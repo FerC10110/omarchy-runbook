@@ -98,6 +98,10 @@ class ListSessionsTest(unittest.TestCase):
         t, _ = tmux((1, "", "error connecting to /tmp/tmux-1000/sock (No such file or directory)\n"))
         self.assertEqual(engine.list_sessions(t), {})
 
+    def test_exiting_server_means_no_sessions(self):
+        t, _ = tmux((1, "", "server exited unexpectedly\n"))
+        self.assertEqual(engine.list_sessions(t), {})
+
 
 class SessionStateTest(unittest.TestCase):
     def test_alive(self):
@@ -123,6 +127,11 @@ class SessionStateTest(unittest.TestCase):
         with self.assertRaises(engine.NoSession):
             engine.session_state(t, ID)
 
+    def test_exiting_server_is_no_session(self):
+        t, _ = tmux((1, "", "server exited unexpectedly\n"))
+        with self.assertRaises(engine.NoSession):
+            engine.session_state(t, ID)
+
 
 class StartSessionTest(unittest.TestCase):
     def test_argv_passes_command_through_environment(self):
@@ -132,8 +141,8 @@ class StartSessionTest(unittest.TestCase):
         self.assertEqual(fake.tails(), [[
             "new-session", "-d", "-s", ID, "-x", "120", "-y", "30", "-c", "/h",
             "-e", "RUNBOOK_COMMAND=echo 'a' \"b\" $C",
-            "-e", "PATH=/h/.local/bin:/usr/bin",
-            "--", 'exec bash -c "$RUNBOOK_COMMAND"']])
+            "-e", "RUNBOOK_PATH=/h/.local/bin:/usr/bin",
+            "--", 'export PATH="$RUNBOOK_PATH"; exec bash -c "$RUNBOOK_COMMAND"']])
 
     def test_failure_raises(self):
         t, _ = tmux((1, "", "duplicate session: x\n"))

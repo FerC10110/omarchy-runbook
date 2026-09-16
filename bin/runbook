@@ -190,12 +190,13 @@ def set_view(library, view):
 # ----------------------------------------------------------------- tmux
 
 NO_SESSION_MESSAGE = "No session for this script"
-NO_SESSION_MARKERS = ("no server running", "can't find", "no current target", "session not found", "error connecting to")
+NO_SESSION_MARKERS = ("no server running", "can't find", "no current target", "session not found",
+                      "error connecting to", "server exited unexpectedly")
 COLS_RANGE, ROWS_RANGE = (20, 500), (5, 200)
 PROMPT_RE = re.compile(r"(password|contraseña)[^:]*:\s*$", re.IGNORECASE)
 STATE_FORMAT = "#{pane_dead}\t#{pane_dead_status}\t#{pane_dead_signal}\t#{pane_pid}"
 LIST_FORMAT = "#{session_name}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_dead_signal}"
-LAUNCHER = 'exec bash -c "$RUNBOOK_COMMAND"'
+LAUNCHER = 'export PATH="$RUNBOOK_PATH"; exec bash -c "$RUNBOOK_COMMAND"'
 
 
 class NoSession(RunbookError):
@@ -296,7 +297,7 @@ def start_session(tmux, script_id, command, cols, rows, environ):
     code, _, err = tmux.call(
         "new-session", "-d", "-s", script_id, "-x", str(cols), "-y", str(rows), "-c", home,
         "-e", "RUNBOOK_COMMAND=" + command,
-        "-e", "PATH=" + path_with_local_bin(environ),
+        "-e", "RUNBOOK_PATH=" + path_with_local_bin(environ),
         "--", LAUNCHER)
     if code != 0:
         raise _fail(err)
