@@ -94,6 +94,10 @@ class ListSessionsTest(unittest.TestCase):
             engine.list_sessions(t)
         self.assertEqual(str(ctx.exception), "tmux: something broke")
 
+    def test_never_started_socket_means_no_sessions(self):
+        t, _ = tmux((1, "", "error connecting to /tmp/tmux-1000/sock (No such file or directory)\n"))
+        self.assertEqual(engine.list_sessions(t), {})
+
 
 class SessionStateTest(unittest.TestCase):
     def test_alive(self):
@@ -113,6 +117,11 @@ class SessionStateTest(unittest.TestCase):
             with self.assertRaises(engine.NoSession) as ctx:
                 engine.session_state(t, ID)
             self.assertEqual(str(ctx.exception), "No session for this script")
+
+    def test_never_started_socket_is_no_session(self):
+        t, _ = tmux((1, "", "error connecting to /tmp/tmux-1000/sock (No such file or directory)\n"))
+        with self.assertRaises(engine.NoSession):
+            engine.session_state(t, ID)
 
 
 class StartSessionTest(unittest.TestCase):

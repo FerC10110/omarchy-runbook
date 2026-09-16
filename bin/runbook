@@ -189,7 +189,7 @@ def set_view(library, view):
 # ----------------------------------------------------------------- tmux
 
 NO_SESSION_MESSAGE = "No session for this script"
-NO_SESSION_MARKERS = ("no server running", "can't find", "no current target", "session not found")
+NO_SESSION_MARKERS = ("no server running", "can't find", "no current target", "session not found", "error connecting to")
 COLS_RANGE, ROWS_RANGE = (20, 500), (5, 200)
 PROMPT_RE = re.compile(r"(password|contraseña)[^:]*:\s*$", re.IGNORECASE)
 STATE_FORMAT = "#{pane_dead}\t#{pane_dead_status}\t#{pane_dead_signal}\t#{pane_pid}"
