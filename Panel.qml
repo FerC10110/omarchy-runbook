@@ -23,9 +23,9 @@ Panel {
   property var sessions: ({})           // id -> { dead: bool, exit: int|null }
   property string selectedId: ""
   property bool editorOpen: false
-  property bool inputFocused: false     // bound to the terminal input in Task 9
-  property int termCols: 80             // bound to the terminal's measured size in Task 9
-  property int termRows: 24
+  property bool inputFocused: terminalPane.inputFocused
+  property int termCols: terminalPane.cols
+  property int termRows: terminalPane.rows
   readonly property string mode: editorOpen ? "editor"
     : (selected !== null && sessionOf(selected.id) !== null ? "terminal" : "help")
   property string editingId: ""         // "" while adding, id while editing
@@ -65,6 +65,7 @@ Panel {
   function selectScript(id) {
     selectedId = id
     editorOpen = false
+    if (isAlive(id)) Qt.callLater(terminalPane.focusInput)
   }
 
   function moveSelection(delta) {
@@ -98,6 +99,87 @@ Panel {
       if (!payload || payload.error !== undefined) return
       markSession(id, false, null)
       refreshStatus()
+    })
+  }
+
+  // ---- terminal screen: polled every 300 ms while the panel is open and the
+  // selected script has a session. A dead session is fetched once more and
+  // then left alone until it is run again.
+  property var screen: ({ text: "", dead: false, exit: null, prompt: null })
+  property string screenFor: ""
+  readonly property bool viewingTerminal: opened && mode === "terminal"
+  readonly property bool screenSettled: screenFor === selectedId && screen.dead === true && !isAlive(selectedId)
+
+  function pollScreen() {
+    if (screenProc.running || selectedId === "" || sessionOf(selectedId) === null) return
+    screenProc.targetId = selectedId
+    screenProc.command = [pluginPath("bin/runbook"), "screen", selectedId]
+    screenProc.running = true
+  }
+
+  function applyScreen(id, text) {
+    var payload = null
+    try { payload = JSON.parse(String(text || "")) } catch (e) { return }
+    if (!payload) return
+    if (payload.error !== undefined) {
+      // "No session for this script": forget it so the pane goes back to help.
+      dropSession(id)
+      if (screenFor === id) screenFor = ""
+      return
+    }
+    if (id !== selectedId) return
+    var next = {
+      text: String(payload.text || ""),
+      dead: payload.dead === true,
+      exit: payload.exit === undefined ? null : payload.exit,
+      prompt: payload.prompt || null
+    }
+    screenFor = id
+    // Replace only on change, so the Text under the pointer is not rebuilt.
+    if (screen.text !== next.text || screen.dead !== next.dead || screen.exit !== next.exit || screen.prompt !== next.prompt)
+      screen = next
+    var known = sessionOf(id)
+    if (known === null || known.dead !== next.dead || known.exit !== next.exit) markSession(id, next.dead, next.exit)
+  }
+
+  Process {
+    id: screenProc
+    property string targetId: ""
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: runbook.applyScreen(screenProc.targetId, text)
+    }
+  }
+
+  Timer {
+    interval: 300
+    running: runbook.viewingTerminal && !runbook.screenSettled
+    repeat: true
+    triggeredOnStart: true
+    onTriggered: runbook.pollScreen()
+  }
+
+  onSelectedIdChanged: {
+    // A different script: show nothing stale while its first screen arrives.
+    if (screenFor !== selectedId) screen = { text: "", dead: false, exit: null, prompt: null }
+  }
+
+  function sendLine(id, text) {
+    engineCall(["send", id], { text: text }, function(payload) { pollScreen() })
+  }
+
+  function stopScript(id) {
+    engineCall(["stop", id], null, function(payload) {
+      if (!payload || payload.error !== undefined) return
+      markSession(id, payload.dead === true, payload.exit === undefined ? null : payload.exit)
+      pollScreen()
+    })
+  }
+
+  function closeScript(id) {
+    engineCall(["close", id], null, function(payload) {
+      dropSession(id)
+      if (screenFor === id) { screenFor = ""; screen = { text: "", dead: false, exit: null, prompt: null } }
     })
   }
 
@@ -354,6 +436,23 @@ Panel {
                 font.pixelSize: Style.font.body
               }
             }
+          }
+
+          TerminalPane {
+            id: terminalPane
+            anchors.fill: parent
+            visible: runbook.mode === "terminal"
+            screen: runbook.screen
+            alive: runbook.isAlive(runbook.selectedId)
+            foreground: runbook.foreground
+            accent: runbook.accent
+            urgent: runbook.urgent
+            dim: runbook.dim
+            fontFamily: runbook.fontFamily
+            monoFamily: runbook.monoFamily
+            onSendRequested: function(text) { runbook.sendLine(runbook.selectedId, text) }
+            onStopRequested: runbook.stopScript(runbook.selectedId)
+            onCloseRequested: runbook.closeScript(runbook.selectedId)
           }
         }
       }
