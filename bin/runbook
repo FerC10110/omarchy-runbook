@@ -7,8 +7,11 @@ stdin; only ids and numbers travel as arguments.
 """
 import json
 import os
+import re
+import secrets
 import subprocess
 import sys
+import tempfile
 import time
 
 USAGE = "Usage: runbook <command> [id] [--cols N --rows N]"
@@ -16,6 +19,171 @@ USAGE = "Usage: runbook <command> [id] [--cols N --rows N]"
 
 class RunbookError(Exception):
     """An error we report to the panel as {"error": message}."""
+
+
+# ---------------------------------------------------------------- store
+
+DEFAULT_VIEW = {"width": 960, "height": 540}
+ID_RE = re.compile(r"^[0-9a-f]{32}$")
+NAME_MAX, COMMAND_MAX, HELP_MAX = 64, 4096, 4096
+VIEW_WIDTH, VIEW_HEIGHT = (600, 4000), (360, 3000)
+
+
+def library_path(environ):
+    base = environ.get("XDG_CONFIG_HOME") or os.path.join(
+        environ.get("HOME") or os.path.expanduser("~"), ".config")
+    return os.path.join(base, "runbook", "scripts.json")
+
+
+def empty_library():
+    return {"version": 1, "view": dict(DEFAULT_VIEW), "scripts": []}
+
+
+def _has_control_chars(text):
+    return any(ord(ch) < 32 or ord(ch) == 127 for ch in text)
+
+
+def _text(fields, key, maximum, minimum, label):
+    value = fields.get(key, "")
+    if value is None:
+        value = ""
+    if not isinstance(value, str):
+        raise RunbookError(f"{label} must be text")
+    value = value.strip()
+    if len(value) < minimum:
+        raise RunbookError(f"{label} must be {minimum}-{maximum} characters")
+    if len(value) > maximum:
+        if minimum == 0:
+            raise RunbookError(f"{label} must be at most {maximum} characters")
+        raise RunbookError(f"{label} must be {minimum}-{maximum} characters")
+    return value
+
+
+def validate_script(fields):
+    if not isinstance(fields, dict):
+        raise RunbookError("Script must be a JSON object")
+    name = _text(fields, "name", NAME_MAX, 1, "Name")
+    if _has_control_chars(name):
+        raise RunbookError("Name must not contain control characters")
+    command = _text(fields, "command", COMMAND_MAX, 1, "Command")
+    help_text = _text(fields, "help", HELP_MAX, 0, "Help")
+    return {"name": name, "command": command, "help": help_text}
+
+
+def _bounded_int(value, bounds, label):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RunbookError(f"{label} must be a number")
+    number = int(value)
+    if not bounds[0] <= number <= bounds[1]:
+        raise RunbookError(f"{label} must be between {bounds[0]} and {bounds[1]}")
+    return number
+
+
+def validate_view(view):
+    if not isinstance(view, dict):
+        raise RunbookError("View must be a JSON object")
+    return {"width": _bounded_int(view.get("width"), VIEW_WIDTH, "Width"),
+            "height": _bounded_int(view.get("height"), VIEW_HEIGHT, "Height")}
+
+
+def _normalise(raw):
+    library = empty_library()
+    if not isinstance(raw, dict):
+        return library
+    try:
+        library["view"] = validate_view(raw.get("view"))
+    except RunbookError:
+        pass
+    for item in raw.get("scripts") or []:
+        if not isinstance(item, dict) or not ID_RE.match(str(item.get("id", ""))):
+            continue
+        try:
+            script = validate_script(item)
+        except RunbookError:
+            continue
+        script["id"] = item["id"]
+        library["scripts"].append(script)
+    return library
+
+
+def load_library(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except FileNotFoundError:
+        return empty_library()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise RunbookError(f"Cannot read scripts.json: {exc}")
+    except json.JSONDecodeError:
+        raise RunbookError("scripts.json is not valid JSON")
+    return _normalise(raw)
+
+
+def save_library(path, library):
+    directory = os.path.dirname(path)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    os.chmod(directory, 0o700)
+    fd, tmp_path = tempfile.mkstemp(prefix=".scripts-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(library, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def new_id():
+    return secrets.token_hex(16)
+
+
+def find_script(library, script_id):
+    for script in library["scripts"]:
+        if script["id"] == script_id:
+            return script
+    return None
+
+
+def _check_unique(library, name, skip_id=None):
+    for script in library["scripts"]:
+        if script["id"] != skip_id and script["name"].casefold() == name.casefold():
+            raise RunbookError(f"A script named \"{name}\" already exists")
+
+
+def add_script(library, fields):
+    script = validate_script(fields)
+    _check_unique(library, script["name"])
+    script["id"] = new_id()
+    library["scripts"].append(script)
+    return script
+
+
+def update_script(library, script_id, fields):
+    current = find_script(library, script_id)
+    if current is None:
+        raise RunbookError("No such script")
+    script = validate_script(fields)
+    _check_unique(library, script["name"], skip_id=script_id)
+    current.update(script)
+    return current
+
+
+def remove_script(library, script_id):
+    current = find_script(library, script_id)
+    if current is None:
+        raise RunbookError("No such script")
+    library["scripts"].remove(current)
+    return current
+
+
+def set_view(library, view):
+    library["view"] = validate_view(view)
+    return library["view"]
 
 
 def dispatch(argv, environ, run, stdin, kill, sleep, clock):
