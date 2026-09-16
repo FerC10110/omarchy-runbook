@@ -48,8 +48,10 @@ class SystemTest(unittest.TestCase):
         while True:
             code, screen = self.cli(["screen", script_id])
             self.assertEqual(code, 0, screen)
-            if predicate(screen) or time.monotonic() > deadline:
+            if predicate(screen):
                 return screen
+            if time.monotonic() > deadline:
+                self.fail(f"timed out after {timeout:g}s waiting for {script_id}; last screen: {screen!r}")
             time.sleep(0.1)
 
     def run_script(self, script_id, cols=60, rows=10):
