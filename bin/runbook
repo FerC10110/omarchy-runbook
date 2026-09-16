@@ -9,6 +9,7 @@ import json
 import os
 import re
 import secrets
+import signal
 import subprocess
 import sys
 import tempfile
@@ -346,6 +347,44 @@ def resize_session(tmux, script_id, cols, rows):
 
 def kill_session(tmux, script_id):
     tmux.call("kill-session", "-t", script_id)
+
+
+# ----------------------------------------------------------------- stop
+
+
+def _wait_dead(tmux, script_id, deadline, sleep, clock, poll):
+    """Poll the pane until it is dead or the deadline passes. Returns the state."""
+    while True:
+        state = session_state(tmux, script_id)
+        if state["dead"] or clock() >= deadline:
+            return state
+        sleep(poll)
+
+
+def _signal_group(kill, pid, sig):
+    try:
+        kill(-pid, sig)
+    except ProcessLookupError:
+        pass
+
+
+def stop_session(tmux, script_id, *, kill=os.kill, sleep=time.sleep, clock=time.monotonic,
+                 grace=2.0, poll=0.1):
+    """Interrupt the command but keep its screen: C-c, then SIGTERM and SIGKILL
+    to the pane's process group (tmux starts the command as group leader, so
+    the pgid equals pane_pid)."""
+    state = session_state(tmux, script_id)
+    if state["dead"]:
+        return {"dead": True, "exit": state["exit"]}
+    _checked(tmux, "send-keys", "-t", script_id, "C-c")
+    state = _wait_dead(tmux, script_id, clock() + grace, sleep, clock, poll)
+    if not state["dead"]:
+        _signal_group(kill, state["pid"], signal.SIGTERM)
+        state = _wait_dead(tmux, script_id, clock() + grace, sleep, clock, poll)
+    if not state["dead"]:
+        _signal_group(kill, state["pid"], signal.SIGKILL)
+        state = _wait_dead(tmux, script_id, clock() + poll * 4, sleep, clock, poll)
+    return {"dead": state["dead"], "exit": state["exit"]}
 
 
 def dispatch(argv, environ, run, stdin, kill, sleep, clock):
