@@ -387,10 +387,134 @@ def stop_session(tmux, script_id, *, kill=os.kill, sleep=time.sleep, clock=time.
     return {"dead": state["dead"], "exit": state["exit"]}
 
 
+# ------------------------------------------------------------------ cli
+
+PLUGIN_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_COLS, DEFAULT_ROWS = 80, 24
+
+
+def build_tmux(environ, run):
+    socket = environ.get("RUNBOOK_TMUX_SOCKET") or "runbook"
+    conf = environ.get("RUNBOOK_TMUX_CONF") or os.path.join(PLUGIN_DIR, "tmux.conf")
+    return Tmux(socket, conf, run=run)
+
+
+def read_stdin_json(stdin):
+    """One JSON object on one line. readline() (not read()) so the panel can
+    keep the pipe open; the camera plugin's config.py does the same."""
+    try:
+        data = json.loads(stdin.readline() or "")
+    except (ValueError, OSError):
+        raise RunbookError("Expected a JSON object on stdin")
+    if not isinstance(data, dict):
+        raise RunbookError("Expected a JSON object on stdin")
+    return data
+
+
+def parse_size(args):
+    cols, rows = DEFAULT_COLS, DEFAULT_ROWS
+    it = iter(args)
+    try:
+        for flag in it:
+            if flag == "--cols":
+                cols = int(next(it))
+            elif flag == "--rows":
+                rows = int(next(it))
+            else:
+                raise RunbookError(f"Unknown option: {flag}")
+    except (StopIteration, ValueError):
+        raise RunbookError("--cols and --rows must be integers")
+    return clamp_size(cols, rows)
+
+
+def _script_id(args):
+    if not args:
+        raise RunbookError("Missing script id")
+    return check_id(args[0])
+
+
 def dispatch(argv, environ, run, stdin, kill, sleep, clock):
     if not argv:
         raise RunbookError(USAGE)
-    raise RunbookError("Unknown command: " + argv[0])
+    command, args = argv[0], argv[1:]
+    path = library_path(environ)
+
+    if command == "list":
+        return load_library(path)
+    if command == "add":
+        fields = read_stdin_json(stdin)
+        library = load_library(path)
+        add_script(library, fields)
+        save_library(path, library)
+        return library
+    if command == "update":
+        script_id = _script_id(args)
+        fields = read_stdin_json(stdin)
+        library = load_library(path)
+        update_script(library, script_id, fields)
+        save_library(path, library)
+        return library
+    if command == "remove":
+        script_id = _script_id(args)
+        library = load_library(path)
+        remove_script(library, script_id)
+        save_library(path, library)
+        # The script is gone even if tmux is unavailable; the session is best effort.
+        try:
+            kill_session(build_tmux(environ, run), script_id)
+        except RunbookError:
+            pass
+        return library
+    if command == "set-view":
+        view = read_stdin_json(stdin)
+        library = load_library(path)
+        set_view(library, view)
+        save_library(path, library)
+        return library
+
+    tmux = build_tmux(environ, run)
+    if command == "status":
+        return {"sessions": list_sessions(tmux)}
+
+    if command not in ("run", "screen", "send", "stop", "close", "resize"):
+        raise RunbookError("Unknown command: " + command)
+
+    script_id = _script_id(args)
+    if command == "run":
+        cols, rows = parse_size(args[1:])
+        script = find_script(load_library(path), script_id)
+        if script is None:
+            raise RunbookError("No such script")
+        try:
+            state = session_state(tmux, script_id)
+        except NoSession:
+            state = None
+        if state is not None and not state["dead"]:
+            return {"ok": True, "already": True}
+        if state is not None:
+            kill_session(tmux, script_id)
+        start_session(tmux, script_id, script["command"], cols, rows, environ)
+        return {"ok": True, "already": False}
+    if command == "screen":
+        state = session_state(tmux, script_id)
+        text = capture(tmux, script_id)
+        return {"text": text, "dead": state["dead"], "exit": state["exit"], "prompt": detect_prompt(text)}
+    if command == "send":
+        data = read_stdin_json(stdin)
+        if not isinstance(data.get("text"), str):
+            raise RunbookError("Expected a \"text\" string")
+        send_line(tmux, script_id, data["text"])
+        return {"ok": True}
+    if command == "stop":
+        state = stop_session(tmux, script_id, kill=kill, sleep=sleep, clock=clock)
+        return {"ok": True, "dead": state["dead"], "exit": state["exit"]}
+    if command == "close":
+        kill_session(tmux, script_id)
+        return {"ok": True}
+    if command == "resize":
+        cols, rows = parse_size(args[1:])
+        resize_session(tmux, script_id, cols, rows)
+        return {"ok": True}
 
 
 def main(argv=None, *, environ=None, run=subprocess.run, stdin=None, stdout=None,
