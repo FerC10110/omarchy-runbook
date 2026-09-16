@@ -1,0 +1,45 @@
+#!/usr/bin/python3
+"""Runbook engine: stores the user's scripts and drives a private tmux server.
+
+Every subcommand prints one JSON document on stdout. Errors of our own print
+{"error": "..."} and exit 1. Data from the panel arrives as one JSON line on
+stdin; only ids and numbers travel as arguments.
+"""
+import json
+import os
+import subprocess
+import sys
+import time
+
+USAGE = "Usage: runbook <command> [id] [--cols N --rows N]"
+
+
+class RunbookError(Exception):
+    """An error we report to the panel as {"error": message}."""
+
+
+def dispatch(argv, environ, run, stdin, kill, sleep, clock):
+    if not argv:
+        raise RunbookError(USAGE)
+    raise RunbookError("Unknown command: " + argv[0])
+
+
+def main(argv=None, *, environ=None, run=subprocess.run, stdin=None, stdout=None,
+         kill=os.kill, sleep=time.sleep, clock=time.monotonic):
+    argv = sys.argv[1:] if argv is None else list(argv)
+    environ = os.environ if environ is None else environ
+    stdin = sys.stdin if stdin is None else stdin
+    stdout = sys.stdout if stdout is None else stdout
+    try:
+        payload = dispatch(argv, environ, run, stdin, kill, sleep, clock)
+        code = 0
+    except RunbookError as exc:
+        payload = {"error": str(exc)}
+        code = 1
+    stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    stdout.flush()
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())
