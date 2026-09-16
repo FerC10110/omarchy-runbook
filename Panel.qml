@@ -97,6 +97,7 @@ Panel {
     if (isAlive(id)) return
     engineCall(["run", id, "--cols", String(termCols), "--rows", String(termRows)], null, function(payload) {
       if (!payload || payload.error !== undefined) return
+      screenEpoch++
       markSession(id, false, null)
       refreshStatus()
     })
@@ -105,21 +106,33 @@ Panel {
   // ---- terminal screen: polled every 300 ms while the panel is open and the
   // selected script has a session. A dead session is fetched once more and
   // then left alone until it is run again.
-  property var screen: ({ text: "", dead: false, exit: null, prompt: null })
+  function emptyScreen() { return { text: "", dead: false, exit: null, prompt: null } }
+
+  property var screen: emptyScreen()
   property string screenFor: ""
+  // Bumped by every action that changes session state (run/stop/close) so a
+  // screenProc reply started before that action, and landing after it, is
+  // recognised as stale and dropped instead of reviving what the action just
+  // changed. See applyScreen().
+  property int screenEpoch: 0
   readonly property bool viewingTerminal: opened && mode === "terminal"
   readonly property bool screenSettled: screenFor === selectedId && screen.dead === true && !isAlive(selectedId)
 
   function pollScreen() {
     if (screenProc.running || selectedId === "" || sessionOf(selectedId) === null) return
     screenProc.targetId = selectedId
+    screenProc.epoch = screenEpoch
     screenProc.command = [pluginPath("bin/runbook"), "screen", selectedId]
     screenProc.running = true
   }
 
-  function applyScreen(id, text) {
+  function applyScreen(id, epoch, text) {
     var payload = null
     try { payload = JSON.parse(String(text || "")) } catch (e) { return }
+    // A stop/close/run landed while this poll was in flight: its answer no
+    // longer reflects the current session state, on either the error or the
+    // success path, so ignore it outright.
+    if (epoch !== screenEpoch) return
     if (!payload) return
     if (payload.error !== undefined) {
       // "No session for this script": forget it so the pane goes back to help.
@@ -134,20 +147,25 @@ Panel {
       exit: payload.exit === undefined ? null : payload.exit,
       prompt: payload.prompt || null
     }
+    // A session a close already dropped must not be repopulated by a poll
+    // that was merely late, not stale by epoch (e.g. one issued for `id`
+    // just before it stopped being the selected script's session at all).
+    var known = sessionOf(id)
+    if (known === null) return
     screenFor = id
     // Replace only on change, so the Text under the pointer is not rebuilt.
     if (screen.text !== next.text || screen.dead !== next.dead || screen.exit !== next.exit || screen.prompt !== next.prompt)
       screen = next
-    var known = sessionOf(id)
-    if (known === null || known.dead !== next.dead || known.exit !== next.exit) markSession(id, next.dead, next.exit)
+    if (known.dead !== next.dead || known.exit !== next.exit) markSession(id, next.dead, next.exit)
   }
 
   Process {
     id: screenProc
     property string targetId: ""
+    property int epoch: 0
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: runbook.applyScreen(screenProc.targetId, text)
+      onStreamFinished: runbook.applyScreen(screenProc.targetId, screenProc.epoch, text)
     }
   }
 
@@ -161,7 +179,7 @@ Panel {
 
   onSelectedIdChanged: {
     // A different script: show nothing stale while its first screen arrives.
-    if (screenFor !== selectedId) screen = { text: "", dead: false, exit: null, prompt: null }
+    if (screenFor !== selectedId) screen = emptyScreen()
   }
 
   function sendLine(id, text) {
@@ -171,6 +189,7 @@ Panel {
   function stopScript(id) {
     engineCall(["stop", id], null, function(payload) {
       if (!payload || payload.error !== undefined) return
+      screenEpoch++
       markSession(id, payload.dead === true, payload.exit === undefined ? null : payload.exit)
       pollScreen()
     })
@@ -178,8 +197,11 @@ Panel {
 
   function closeScript(id) {
     engineCall(["close", id], null, function(payload) {
+      // Unconditional, unlike stop/play/applyScreen: a close on a session
+      // that is already gone (engine error) must still clear the pane.
+      screenEpoch++
       dropSession(id)
-      if (screenFor === id) { screenFor = ""; screen = { text: "", dead: false, exit: null, prompt: null } }
+      if (screenFor === id) { screenFor = ""; screen = emptyScreen() }
     })
   }
 
