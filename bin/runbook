@@ -186,6 +186,168 @@ def set_view(library, view):
     return library["view"]
 
 
+# ----------------------------------------------------------------- tmux
+
+NO_SESSION_MESSAGE = "No session for this script"
+NO_SESSION_MARKERS = ("no server running", "can't find", "no current target", "session not found")
+COLS_RANGE, ROWS_RANGE = (20, 500), (5, 200)
+PROMPT_RE = re.compile(r"(password|contraseña)[^:]*:\s*$", re.IGNORECASE)
+STATE_FORMAT = "#{pane_dead}\t#{pane_dead_status}\t#{pane_dead_signal}\t#{pane_pid}"
+LIST_FORMAT = "#{session_name}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_dead_signal}"
+LAUNCHER = 'exec bash -c "$RUNBOOK_COMMAND"'
+
+
+class NoSession(RunbookError):
+    def __init__(self):
+        super().__init__(NO_SESSION_MESSAGE)
+
+
+class Tmux:
+    """Every tmux call: fixed socket and config, bounded time, argv only."""
+
+    def __init__(self, socket, conf, run=subprocess.run, timeout=5.0):
+        self.socket = socket
+        self.conf = conf
+        self.run = run
+        self.timeout = timeout
+
+    def call(self, *args):
+        argv = ["tmux", "-L", self.socket, "-f", self.conf, *args]
+        try:
+            proc = self.run(argv, capture_output=True, text=True, timeout=self.timeout, check=False)
+        except subprocess.TimeoutExpired:
+            raise RunbookError(f"tmux did not answer within {self.timeout:g} seconds")
+        except OSError as exc:
+            raise RunbookError(f"Cannot run tmux: {exc}")
+        return proc.returncode, proc.stdout or "", proc.stderr or ""
+
+
+def _missing(stderr):
+    text = stderr.lower()
+    return any(marker in text for marker in NO_SESSION_MARKERS)
+
+
+def _fail(stderr):
+    return RunbookError("tmux: " + (stderr.strip() or "unknown error"))
+
+
+def check_id(script_id):
+    if not isinstance(script_id, str) or not ID_RE.match(script_id):
+        raise RunbookError("Invalid script id")
+    return script_id
+
+
+def clamp_size(cols, rows):
+    return (min(max(int(cols), COLS_RANGE[0]), COLS_RANGE[1]),
+            min(max(int(rows), ROWS_RANGE[0]), ROWS_RANGE[1]))
+
+
+def path_with_local_bin(environ):
+    home = environ.get("HOME") or os.path.expanduser("~")
+    local = os.path.join(home, ".local", "bin")
+    parts = [p for p in environ.get("PATH", "").split(":") if p]
+    if local not in parts:
+        parts.insert(0, local)
+    return ":".join(parts)
+
+
+def _exit_code(dead, status, sig):
+    if not dead:
+        return None
+    if status.strip():
+        return int(status)
+    if sig.strip():
+        return 128 + int(sig)
+    return None
+
+
+def list_sessions(tmux):
+    code, out, err = tmux.call("list-sessions", "-F", LIST_FORMAT)
+    if code != 0:
+        if _missing(err):
+            return {}
+        raise _fail(err)
+    sessions = {}
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 4 or not ID_RE.match(parts[0]):
+            continue
+        dead = parts[1] == "1"
+        sessions[parts[0]] = {"dead": dead, "exit": _exit_code(dead, parts[2], parts[3])}
+    return sessions
+
+
+def session_state(tmux, script_id):
+    code, out, err = tmux.call("display", "-p", "-t", script_id, STATE_FORMAT)
+    if code != 0:
+        if _missing(err):
+            raise NoSession()
+        raise _fail(err)
+    parts = out.strip("\n").split("\t")
+    if len(parts) != 4 or parts[3].strip() == "":
+        raise NoSession()
+    dead = parts[0] == "1"
+    return {"dead": dead, "exit": _exit_code(dead, parts[1], parts[2]), "pid": int(parts[3])}
+
+
+def start_session(tmux, script_id, command, cols, rows, environ):
+    home = environ.get("HOME") or os.path.expanduser("~")
+    code, _, err = tmux.call(
+        "new-session", "-d", "-s", script_id, "-x", str(cols), "-y", str(rows), "-c", home,
+        "-e", "RUNBOOK_COMMAND=" + command,
+        "-e", "PATH=" + path_with_local_bin(environ),
+        "--", LAUNCHER)
+    if code != 0:
+        raise _fail(err)
+
+
+def trim_trailing_blank(text):
+    lines = text.split("\n")
+    while lines and lines[-1].strip() == "":
+        lines.pop()
+    return "\n".join(lines)
+
+
+def capture(tmux, script_id):
+    code, out, err = tmux.call("capture-pane", "-p", "-t", script_id)
+    if code != 0:
+        if _missing(err):
+            raise NoSession()
+        raise _fail(err)
+    return trim_trailing_blank(out)
+
+
+def detect_prompt(text):
+    for line in reversed(text.split("\n")):
+        if line.strip():
+            return "password" if PROMPT_RE.search(line) else None
+    return None
+
+
+def _checked(tmux, *args):
+    code, _, err = tmux.call(*args)
+    if code != 0:
+        if _missing(err):
+            raise NoSession()
+        raise _fail(err)
+
+
+def send_line(tmux, script_id, text):
+    session_state(tmux, script_id)
+    if text != "":
+        _checked(tmux, "send-keys", "-t", script_id, "-l", "--", text)
+    _checked(tmux, "send-keys", "-t", script_id, "Enter")
+
+
+def resize_session(tmux, script_id, cols, rows):
+    session_state(tmux, script_id)
+    _checked(tmux, "resize-window", "-t", script_id, "-x", str(cols), "-y", str(rows))
+
+
+def kill_session(tmux, script_id):
+    tmux.call("kill-session", "-t", script_id)
+
+
 def dispatch(argv, environ, run, stdin, kill, sleep, clock):
     if not argv:
         raise RunbookError(USAGE)
