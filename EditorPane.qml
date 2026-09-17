@@ -10,6 +10,7 @@ import qs.Ui
 Item {
   id: editor
   property string title: "New script"
+  property bool readOnly: false
   property string errorText: ""
   property color foreground: Color.foreground
   property color accent: Color.accent
@@ -92,7 +93,7 @@ Item {
       else { scheduleMode = "custom"; customOncalendar = sch.oncalendar }
     }
 
-    Qt.callLater(function() { nameField.forceActiveFocus() })
+    if (!readOnly) Qt.callLater(function() { nameField.forceActiveFocus() })
   }
 
   function scheduleObject() {
@@ -146,6 +147,7 @@ Item {
   component TextBox: Rectangle {
     property alias text: area.text
     property alias area: area
+    property alias readOnly: area.readOnly
     property bool mono: false
     readonly property bool focused: area.activeFocus
     Layout.fillWidth: true
@@ -201,15 +203,17 @@ Item {
       placeholderText: "Ports (all)"
       foreground: editor.foreground
       accent: editor.accent
+      readOnly: editor.readOnly
+      opacity: editor.readOnly ? 0.6 : 1.0
       Keys.onEscapePressed: function(event) { editor.cancelRequested(); event.accepted = true }
       onAccepted: commandField.area.forceActiveFocus()
     }
 
     FieldLabel { text: "Command (runs in non-interactive bash, exactly as written)" }
-    TextBox { id: commandField; mono: true }
+    TextBox { id: commandField; mono: true; readOnly: editor.readOnly; opacity: editor.readOnly ? 0.6 : 1.0 }
 
     FieldLabel { text: "Help" }
-    TextBox { id: helpField; Layout.fillHeight: true }
+    TextBox { id: helpField; Layout.fillHeight: true; readOnly: editor.readOnly; opacity: editor.readOnly ? 0.6 : 1.0 }
 
     FieldLabel { text: "Schedule" }
     Flow {

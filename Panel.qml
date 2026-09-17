@@ -37,6 +37,7 @@ Panel {
     : editorOpen ? "editor"
     : (selected !== null && sessionOf(selected.id) !== null ? "terminal" : "help")
   property string editingId: ""         // "" while adding, id while editing
+  property bool editingReadily: false   // true while editing a read-only Readily row (schedule-only)
   property string notice: ""
   property bool engineWriting: false    // true between a write call and its reload
 
@@ -105,7 +106,7 @@ Panel {
     if (editorOpen) return
     selectScript(id)
     if (isAlive(id)) return
-    engineCall(["run", id, "--cols", String(termCols), "--rows", String(termRows)], null, function(payload) {
+    engineCall(["run", id, "--cols", String(termCols), "--rows", String(termRows)], undefined, function(payload) {
       if (!payload || payload.error !== undefined) return
       screenEpoch++
       markSession(id, false, null)
@@ -199,7 +200,7 @@ Panel {
   }
 
   function stopScript(id) {
-    engineCall(["stop", id], null, function(payload) {
+    engineCall(["stop", id], undefined, function(payload) {
       if (!payload || payload.error !== undefined) return
       screenEpoch++
       markSession(id, payload.dead === true, payload.exit === undefined ? null : payload.exit)
@@ -208,7 +209,7 @@ Panel {
   }
 
   function closeScript(id) {
-    engineCall(["close", id], null, function(payload) {
+    engineCall(["close", id], undefined, function(payload) {
       // Unconditional, unlike stop/play/applyScreen: a close on a session
       // that is already gone (engine error) must still clear the pane.
       screenEpoch++
@@ -221,6 +222,8 @@ Panel {
   // ---- add / edit / delete
   function startAdd() {
     editingId = ""
+    editingReadily = false
+    editorPane.readOnly = false
     editorPane.title = "New script"
     editorPane.load(null)
     editorOpen = true
@@ -230,7 +233,9 @@ Panel {
   function startEdit() {
     if (selected === null) return
     editingId = selected.id
-    editorPane.title = "Edit script"
+    editingReadily = (selected.source === "readily")
+    editorPane.readOnly = editingReadily
+    editorPane.title = editingReadily ? "Readily command (schedule only)" : "Edit script"
     editorPane.load(selected)
     editorOpen = true
     settingsOpen = false
@@ -250,6 +255,23 @@ Panel {
   }
 
   function saveEditor(fields) {
+    if (editingReadily) {
+      engineWriting = true
+      engineCall(["schedule-set", editingId], fields.schedule, function(payload) {
+        engineWriting = false
+        if (!payload || payload.error !== undefined) {
+          editorPane.errorText = payload && payload.error ? payload.error : "The engine did not answer"
+          return
+        }
+        if (payload.schedule_warning) showNotice(payload.schedule_warning)
+        editorOpen = false
+        keyCatcher.forceActiveFocus()
+        refreshList()        // re-merge the side-store schedule into the Readily row (so ⏰ shows)
+        refreshSchedules()   // refresh nextRuns
+      })
+      return
+    }
+
     var args = editingId === "" ? ["add"] : ["update", editingId]
     var adding = editingId === ""
     engineWriting = true
@@ -280,7 +302,7 @@ Panel {
     confirm.opened = false
     if (id === "") return
     engineWriting = true
-    engineCall(["remove", id], null, function(payload) {
+    engineCall(["remove", id], undefined, function(payload) {
       engineWriting = false
       if (!payload || payload.error !== undefined) return
       dropSession(id)
@@ -307,7 +329,7 @@ Panel {
       })
     }
     if (selectedId !== "" && sessionOf(selectedId) !== null)
-      engineCall(["resize", selectedId, "--cols", String(termCols), "--rows", String(termRows)], null, function(payload) { pollScreen() })
+      engineCall(["resize", selectedId, "--cols", String(termCols), "--rows", String(termRows)], undefined, function(payload) { pollScreen() })
   }
 
   // Clipboard via wl-copy with the text as its argument: no shell, no quoting.
@@ -359,7 +381,12 @@ Panel {
     onStarted: {
       var call = runbook.engineCurrent
       // The engine reads exactly one line, so the pipe can stay open.
-      if (call && call.stdin !== null && call.stdin !== undefined) write(JSON.stringify(call.stdin) + "\n")
+      // `undefined` is the "no stdin" sentinel; an explicit `null` (e.g. a
+      // Readily schedule turned off) must still be written as the literal
+      // JSON `null` line so the engine's stdin.readline() is not left
+      // blocked forever (which would deadlock this shared, serialized
+      // Process for every later queued call).
+      if (call && call.stdin !== undefined) write(JSON.stringify(call.stdin) + "\n")
     }
     stdout: StdioCollector {
       waitForEnd: true
@@ -382,7 +409,7 @@ Panel {
   }
 
   function refreshSchedules() {
-    engineCall(["schedules"], null, function(p) {
+    engineCall(["schedules"], undefined, function(p) {
       if (p && p.error === undefined) nextRuns = p
     })
   }
@@ -436,7 +463,7 @@ Panel {
   }
 
   function refreshList() {
-    engineCall(["list"], null, applyLibrary)
+    engineCall(["list"], undefined, applyLibrary)
   }
 
   function refreshStatus() {
@@ -481,7 +508,7 @@ Panel {
     if (opened) {
       refreshList()
       refreshStatus()
-      engineCall(["config"], null, function(p) { if (p && p.error === undefined) runbook.config = p })
+      engineCall(["config"], undefined, function(p) { if (p && p.error === undefined) runbook.config = p })
     } else {
       confirm.opened = false
       editorOpen = false
@@ -526,7 +553,7 @@ Panel {
         if (confirm.selectedIndex === 0) confirm.opened = false
         else runbook.performDelete()
       }
-      onDeleteRequested: { if (!confirm.opened && runbook.mode !== "editor") runbook.requestDelete() }
+      onDeleteRequested: { if (!confirm.opened && runbook.mode !== "editor" && !(runbook.selected && runbook.selected.source === "readily")) runbook.requestDelete() }
       onTextKey: function(text) {
         if (text === "c" && runbook.mode === "terminal" && !confirm.opened) terminalPane.copyOutput()
       }
@@ -619,6 +646,7 @@ Panel {
             Button {
               text: "Delete"
               bordered: true
+              visible: !(runbook.selected && runbook.selected.source === "readily")
               enabled: runbook.selected !== null && runbook.mode !== "editor"
               foreground: runbook.urgent
               fontFamily: runbook.fontFamily

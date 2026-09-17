@@ -66,6 +66,15 @@ CursorSurface {
     }
 
     Text {
+      visible: row.script.source === "readily"
+      text: "◆"
+      textFormat: Text.PlainText
+      color: Qt.darker(row.foreground, 1.55)
+      font.family: row.fontFamily
+      font.pixelSize: Style.font.bodySmall
+    }
+
+    Text {
       visible: row.script.schedule ? true : false
       text: "⏰"
       textFormat: Text.PlainText
