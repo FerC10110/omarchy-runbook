@@ -7,8 +7,10 @@ script the two calls independently, matching how the engine already fakes
 tmux/systemctl calls in the other test files.
 """
 import hashlib
+import io
 import json
 import os
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -240,6 +242,172 @@ class ReadilyBinTest(unittest.TestCase):
         with mock.patch.object(engine, "PLUGIN_DIR", runbook_dir):
             environ = {"PATH": self.tmp.name}  # a PATH dir with no "readily" in it
             self.assertIsNone(engine.readily_bin(environ))
+
+
+class SyncFakeRun:
+    """Substitute for subprocess.run that answers systemd-analyze/systemctl
+    calls, mirroring tests/test_schedule.py's FakeRun: systemd-analyze echoes
+    back its argv[2] as the "Normalized form", and systemctl succeeds unless
+    `available=False`. `responses` can override a specific argv tuple."""
+
+    def __init__(self, responses=None, available=True):
+        self.calls = []
+        self.responses = responses or {}
+        self.available = available
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append(list(argv))
+
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        r = R()
+        if argv[:2] == ["systemd-analyze", "calendar"]:
+            r.stdout = "  Normalized form: " + argv[2] + "\n    Next elapse: ...\n"
+        if argv[0] == "systemctl" and not self.available:
+            r.returncode = 1
+            r.stderr = "Failed to connect to bus"
+        key = tuple(argv)
+        if key in self.responses:
+            r.stdout, r.returncode = self.responses[key]
+        return r
+
+
+class ReadilySchedulesPathTest(unittest.TestCase):
+    def test_uses_xdg_config_home_when_set(self):
+        path = engine.readily_schedules_path({"XDG_CONFIG_HOME": "/x/cfg", "HOME": "/h"})
+        self.assertEqual(path, "/x/cfg/runbook/readily-schedules.json")
+
+    def test_falls_back_to_home_dot_config(self):
+        path = engine.readily_schedules_path({"HOME": "/h"})
+        self.assertEqual(path, "/h/.config/runbook/readily-schedules.json")
+
+
+class LoadSaveReadilySchedulesTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.environ = {"XDG_CONFIG_HOME": self.tmp.name, "HOME": "/h"}
+        self.path = os.path.join(self.tmp.name, "runbook", "readily-schedules.json")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_missing_file_is_an_empty_dict(self):
+        self.assertEqual(engine.load_readily_schedules(self.environ), {})
+
+    def test_default_is_not_shared_mutable_state(self):
+        first = engine.load_readily_schedules(self.environ)
+        first["a" * 32] = {"kind": "interval", "seconds": 120}
+        second = engine.load_readily_schedules(self.environ)
+        self.assertEqual(second, {})
+
+    def test_save_then_load_round_trips(self):
+        sid = "a" * 32
+        data = {sid: {"kind": "interval", "seconds": 120}}
+        engine.save_readily_schedules(self.environ, data)
+        self.assertEqual(engine.load_readily_schedules(self.environ), data)
+
+    def test_save_creates_private_dir_and_file(self):
+        engine.save_readily_schedules(self.environ, {})
+        dir_mode = stat.S_IMODE(os.stat(os.path.dirname(self.path)).st_mode)
+        file_mode = stat.S_IMODE(os.stat(self.path).st_mode)
+        self.assertEqual(dir_mode, 0o700)
+        self.assertEqual(file_mode, 0o600)
+
+    def test_malformed_json_repairs_to_empty_dict(self):
+        os.makedirs(os.path.dirname(self.path))
+        with open(self.path, "w") as fh:
+            fh.write("not json")
+        self.assertEqual(engine.load_readily_schedules(self.environ), {})
+
+    def test_top_level_list_repairs_to_empty_dict(self):
+        os.makedirs(os.path.dirname(self.path))
+        with open(self.path, "w") as fh:
+            fh.write("[]")
+        self.assertEqual(engine.load_readily_schedules(self.environ), {})
+
+
+class ScheduleSetDispatchTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.environ = {"HOME": "/h", "XDG_CONFIG_HOME": self.tmp.name}
+        self.store_path = os.path.join(self.tmp.name, "runbook", "readily-schedules.json")
+        os.makedirs(engine.unit_dir(self.environ))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def cli(self, argv, stdin_text="", run=None):
+        fake = run if run is not None else SyncFakeRun()
+        out = io.StringIO()
+        code = engine.main(argv, environ=self.environ, run=fake, stdin=io.StringIO(stdin_text),
+                           stdout=out, kill=lambda pid, sig: None, sleep=lambda s: None,
+                           clock=lambda: 0.0)
+        lines = out.getvalue().splitlines()
+        self.assertEqual(len(lines), 1, "exactly one JSON document")
+        return code, json.loads(lines[0]), fake
+
+    def test_interval_schedule_is_persisted_and_dispatch_syncs(self):
+        sid = "a" * 32
+        code, payload, fake = self.cli(["schedule-set", sid],
+                                       stdin_text='{"kind":"interval","seconds":120}')
+        self.assertEqual(code, 0)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(engine.load_readily_schedules(self.environ),
+                         {sid: {"kind": "interval", "seconds": 120}})
+        # native sync always daemon-reloads first, even though this id is
+        # absent from scripts.json (Task 5 wires the side-store into sync).
+        self.assertTrue(any(c[:3] == ["systemctl", "--user", "daemon-reload"] for c in fake.calls))
+        # and it must NOT enable a runbook-<id>.timer for a Readily-only id.
+        self.assertFalse(any("enable" in c and ("runbook-" + sid + ".timer") in c for c in fake.calls))
+
+    def test_calendar_schedule_is_normalized_via_systemd_analyze(self):
+        sid = "b" * 32
+        expr = "*-*-* 08:00:00"
+        code, payload, fake = self.cli(["schedule-set", sid],
+                                       stdin_text=json.dumps({"kind": "calendar", "oncalendar": expr}))
+        self.assertEqual(code, 0)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(engine.load_readily_schedules(self.environ),
+                         {sid: {"kind": "calendar", "oncalendar": expr}})
+        self.assertTrue(any(c[:2] == ["systemd-analyze", "calendar"] for c in fake.calls))
+
+    def test_null_stdin_clears_an_existing_schedule(self):
+        sid = "c" * 32
+        self.cli(["schedule-set", sid], stdin_text='{"kind":"interval","seconds":120}')
+        self.assertIn(sid, engine.load_readily_schedules(self.environ))
+
+        code, payload, fake = self.cli(["schedule-set", sid], stdin_text="null")
+        self.assertEqual(code, 0)
+        self.assertTrue(payload["ok"])
+        self.assertNotIn(sid, engine.load_readily_schedules(self.environ))
+
+    def test_schedule_below_the_floor_is_rejected_and_not_written(self):
+        sid = "d" * 32
+        code, payload, fake = self.cli(["schedule-set", sid],
+                                       stdin_text='{"kind":"interval","seconds":5}')
+        self.assertEqual(code, 1)
+        self.assertIn("error", payload)
+        self.assertFalse(os.path.exists(self.store_path))
+
+    def test_unknown_kind_is_rejected_and_leaves_the_store_unchanged(self):
+        sid = "e" * 32
+        self.cli(["schedule-set", sid], stdin_text='{"kind":"interval","seconds":120}')
+        before = engine.load_readily_schedules(self.environ)
+
+        code, payload, fake = self.cli(["schedule-set", sid], stdin_text='{"kind":"nope"}')
+        self.assertEqual(code, 1)
+        self.assertIn("error", payload)
+        self.assertEqual(engine.load_readily_schedules(self.environ), before)
+
+    def test_side_store_file_mode_is_0600_dir_0700(self):
+        sid = "f" * 32
+        self.cli(["schedule-set", sid], stdin_text='{"kind":"interval","seconds":120}')
+        dir_mode = stat.S_IMODE(os.stat(os.path.dirname(self.store_path)).st_mode)
+        file_mode = stat.S_IMODE(os.stat(self.store_path).st_mode)
+        self.assertEqual(dir_mode, 0o700)
+        self.assertEqual(file_mode, 0o600)
 
 
 if __name__ == "__main__":

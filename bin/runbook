@@ -282,6 +282,38 @@ def save_config(environ, config):
     return config
 
 
+# ------------------------------------------------------- readily schedules
+
+def readily_schedules_path(environ):
+    """Side-store for schedules on Readily items: those synthetic ids never
+    live in scripts.json (that file is native-scripts-only), so their
+    schedules are kept here, keyed by id. Mirrors config_file_path."""
+    base = environ.get("XDG_CONFIG_HOME") or os.path.join(
+        environ.get("HOME") or os.path.expanduser("~"), ".config")
+    return os.path.join(base, "runbook", "readily-schedules.json")
+
+
+def load_readily_schedules(environ):
+    path = readily_schedules_path(environ)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return raw
+
+
+def save_readily_schedules(environ, data):
+    path = readily_schedules_path(environ)
+    directory = os.path.dirname(path)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    os.chmod(directory, 0o700)
+    _atomic_write(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    return data
+
+
 # ----------------------------------------------------------------- tmux
 
 NO_SESSION_MESSAGE = "No session for this script"
@@ -831,6 +863,22 @@ def dispatch(argv, environ, run, stdin, kill, sleep, clock):
         config = _repair_config(config)
         save_config(environ, config)
         return config
+    if command == "schedule-set":
+        sid = _script_id(args)
+        try:
+            raw = json.loads(stdin.readline() or "")
+        except (ValueError, OSError):
+            raise RunbookError("Expected a schedule object or null on stdin")
+        schedule = validate_schedule(raw)
+        if schedule and schedule["kind"] == "calendar":
+            schedule["oncalendar"] = normalize_calendar(schedule["oncalendar"], run)
+        store = load_readily_schedules(environ)
+        if schedule is None:
+            store.pop(sid, None)
+        else:
+            store[sid] = schedule
+        save_readily_schedules(environ, store)
+        return {"ok": True, **sync_schedules(load_library(path), environ, run)}
     if command == "schedules":
         return schedules_report(load_library(path), environ, run)
 
