@@ -306,6 +306,23 @@ class ScheduleDispatchTest(CliCase):
         self.assertFalse(os.path.exists(self.path))
         self.assertFalse(any("enable" in c for c in run.calls))
 
+    def test_update_invalid_calendar_does_not_save_or_sync(self):
+        add_run = ScheduleFakeRun()
+        code, payload = self.main(["add"], stdin={"name": "n", "command": "c", "help": ""}, run=add_run)
+        self.assertEqual(code, 0)
+        script_id = payload["scripts"][-1]["id"]
+        with open(self.path, "rb") as fh:
+            original_bytes = fh.read()
+
+        run = ScheduleFakeRun(responses={("systemd-analyze", "calendar", "bad"): ("", 1)})
+        code, payload = self.main(["update", script_id], stdin={
+            "name": "n", "command": "c", "help": "",
+            "schedule": {"kind": "calendar", "oncalendar": "bad"}}, run=run)
+        self.assertEqual((code, payload), (1, {"error": "Not a valid schedule"}))
+        with open(self.path, "rb") as fh:
+            self.assertEqual(fh.read(), original_bytes)
+        self.assertFalse(any("enable" in c for c in run.calls))
+
     def test_schedules_readonly_without_systemd_returns_empty(self):
         run = ScheduleFakeRun(available=False)
         code, payload = self.main(["schedules"], run=run)

@@ -150,6 +150,31 @@ class SyncTest(unittest.TestCase):
                                                "schedule": {"kind": "interval", "seconds": 600}}]), self.env, run)
         self.assertIn("schedule_warning", out)
 
+    def test_bus_drop_on_disable_returns_warning(self):
+        """The stale-unit sweep's `disable --now` result must be checked too,
+        symmetric to the daemon-reload/enable checks above."""
+        class DropsOnDisable:
+            def __call__(self, argv, **kwargs):
+                class R:
+                    returncode = 0
+                    stdout = ""
+                    stderr = ""
+                r = R()
+                if argv[:3] == ["systemctl", "--user", "disable"]:
+                    r.returncode = 1
+                    r.stderr = "Failed to connect to bus"
+                return r
+
+        run = DropsOnDisable()
+        stale_sid = "f" * 32
+        d = engine.unit_dir(self.env)
+        for ext in ("timer", "service"):
+            open(os.path.join(d, "runbook-" + stale_sid + "." + ext), "w").close()
+        sid = "g" * 32
+        out = engine.sync_schedules(self.lib([{"id": sid, "name": "n", "command": "c", "help": "",
+                                               "schedule": {"kind": "interval", "seconds": 600}}]), self.env, run)
+        self.assertIn("schedule_warning", out)
+
 
 class NormalizeCalendarTest(unittest.TestCase):
     def test_normalizes_via_systemd_analyze(self):
@@ -207,6 +232,27 @@ class ReportTest(unittest.TestCase):
         report = engine.schedules_report(lib, self.env, run)
         self.assertIn(sid, report)
         self.assertTrue(report[sid]["next"])
+
+    def test_past_realtime_is_skipped(self):
+        sid = "f" * 32
+        past_usec = int((datetime.datetime.now(datetime.timezone.utc).timestamp() - 3600) * 1_000_000)
+        run = FakeRun(responses={self.show_argv(sid): (
+            f"NextElapseUSecRealtime={past_usec}\nNextElapseUSecMonotonic=0\n", 0)})
+        lib = self.lib([{"id": sid, "name": "n", "command": "c", "help": "",
+                         "schedule": {"kind": "calendar", "oncalendar": "*-*-* 08:00:00"}}])
+        report = engine.schedules_report(lib, self.env, run)
+        self.assertIsInstance(report, dict)
+        self.assertNotIn(sid, report)
+
+    def test_non_numeric_property_is_skipped_without_raising(self):
+        sid = "g" * 32
+        run = FakeRun(responses={self.show_argv(sid): (
+            "NextElapseUSecRealtime=garbage\nNextElapseUSecMonotonic=0\n", 0)})
+        lib = self.lib([{"id": sid, "name": "n", "command": "c", "help": "",
+                         "schedule": {"kind": "interval", "seconds": 600}}])
+        report = engine.schedules_report(lib, self.env, run)
+        self.assertIsInstance(report, dict)
+        self.assertNotIn(sid, report)
 
     def test_unscheduled_scripts_are_not_queried(self):
         run = FakeRun()

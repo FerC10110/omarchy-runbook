@@ -472,8 +472,12 @@ def _bus_unavailable(result):
         marker in (result.stderr or "").lower() for marker in _BUS_UNAVAILABLE_MARKERS)
 
 
+def _unit_base(sid):
+    return "runbook-" + sid
+
+
 def _unit_name(sid, ext):
-    return "runbook-" + sid + ext
+    return _unit_base(sid) + ext
 
 
 def normalize_calendar(expr, run):
@@ -527,7 +531,7 @@ def sync_schedules(library, environ, run):
 
     # Escribir/activar los programados.
     for sid, schedule in scheduled.items():
-        base = os.path.join(directory, "runbook-" + sid)
+        base = os.path.join(directory, _unit_base(sid))
         _atomic_write(base + ".service", render_service(sid, environ))
         _atomic_write(base + ".timer", render_timer(schedule))
     if _bus_unavailable(_systemctl(run, environ, "daemon-reload")):
