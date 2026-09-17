@@ -69,7 +69,8 @@ class UsageTest(CliCase):
         self.assertEqual((code, payload), (1, {"error": engine.USAGE}))
 
     def test_commands_needing_an_id_reject_bad_ids_before_tmux(self):
-        for cmd in ("update", "remove", "run", "screen", "send", "stop", "close", "resize"):
+        for cmd in ("update", "remove", "run", "screen", "send", "stop", "close", "resize",
+                    "schedule-set"):
             code, payload, fake = self.cli([cmd, "bad-id"], stdin_text="{}")
             self.assertEqual((code, payload), (1, {"error": "Invalid script id"}), cmd)
             self.assertEqual(fake.calls, [], cmd)
