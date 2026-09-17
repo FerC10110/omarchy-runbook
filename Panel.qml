@@ -778,6 +778,7 @@ Panel {
                     var next = !checked
                     runbook.engineCall(["set-config"], { readily: { enabled: next } }, function(p) {
                       if (p && p.error === undefined) { runbook.config = p; runbook.refreshList() }
+                      if (p && p.schedule_warning) runbook.showNotice(p.schedule_warning)
                     })
                   }
                 }

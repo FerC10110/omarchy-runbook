@@ -64,6 +64,19 @@ class RenderTest(unittest.TestCase):
         self.assertNotIn("Injected", text)
         self.assertNotIn("RUNBOOK_TMUX_CONF", text)
 
+    def test_service_includes_readily_bin_when_set(self):
+        """M4: a scheduled unit must carry RUNBOOK_READILY_BIN, or an install
+        that resolves the readily binary solely via that env override breaks
+        when the timer fires (no interactive shell env to inherit)."""
+        env = dict(self.env)
+        env["RUNBOOK_READILY_BIN"] = "/opt/readily/bin/readily"
+        text = engine.render_service("a" * 32, env)
+        self.assertIn("Environment=RUNBOOK_READILY_BIN=/opt/readily/bin/readily", text)
+
+    def test_service_omits_readily_bin_when_unset(self):
+        text = engine.render_service("a" * 32, self.env)
+        self.assertNotIn("RUNBOOK_READILY_BIN", text)
+
 
 class SyncTest(unittest.TestCase):
     def setUp(self):

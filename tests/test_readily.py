@@ -990,5 +990,77 @@ class SchedulesReportReadilySideStoreTest(unittest.TestCase):
         self.assertIn(rid_b, report)
 
 
+class SetConfigReconciliationTest(unittest.TestCase):
+    """Fix I1 (final-review blocker): set-config must reconcile timers, not
+    just persist. sync_schedules is already config-gated on readily.enabled,
+    so the headline behavior is the toggle itself: OFF tears down
+    previously-scheduled Readily timers (via the stale-unit sweep) while
+    retaining the side-store for a later re-enable; ON picks up existing
+    side-store entries whose Readily command still exists."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.fake_bin = os.path.join(self.tmp.name, "readily")
+        with open(self.fake_bin, "w") as fh:
+            fh.write("#!/bin/sh\n")
+        os.chmod(self.fake_bin, 0o755)
+        self.environ = {"HOME": "/h", "XDG_CONFIG_HOME": self.tmp.name,
+                        "RUNBOOK_READILY_BIN": self.fake_bin}
+        os.makedirs(engine.unit_dir(self.environ))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def timer_path(self, sid):
+        return os.path.join(engine.unit_dir(self.environ), "runbook-" + sid + ".timer")
+
+    def service_path(self, sid):
+        return os.path.join(engine.unit_dir(self.environ), "runbook-" + sid + ".service")
+
+    def touch_unit(self, sid):
+        d = engine.unit_dir(self.environ)
+        for ext in ("timer", "service"):
+            open(os.path.join(d, "runbook-" + sid + "." + ext), "w").close()
+
+    def cli(self, argv, run, stdin_text=""):
+        out = io.StringIO()
+        code = engine.main(argv, environ=self.environ, run=run, stdin=io.StringIO(stdin_text),
+                           stdout=out, kill=lambda pid, sig: None, sleep=lambda s: None,
+                           clock=lambda: 0.0)
+        lines = out.getvalue().splitlines()
+        self.assertEqual(len(lines), 1, "exactly one JSON document")
+        return code, json.loads(lines[0])
+
+    def test_toggle_off_tears_down_readily_timers_but_retains_the_store(self):
+        engine.save_config(self.environ, {"version": 1, "readily": {"enabled": True}})
+        rid = expected_id("Backup home")
+        engine.save_readily_schedules(self.environ, {rid: {"kind": "interval", "seconds": 120}})
+        self.touch_unit(rid)
+        run = ScheduleSyncFakeRun(listing=(0, LIST_PAYLOAD, ""))
+
+        code, payload = self.cli(["set-config"], run, stdin_text='{"readily":{"enabled":false}}')
+
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["readily"]["enabled"], False)
+        self.assertFalse(os.path.exists(self.timer_path(rid)))
+        self.assertFalse(os.path.exists(self.service_path(rid)))
+        self.assertTrue(any("disable" in c and ("runbook-" + rid + ".timer") in c for c in run.calls))
+        # The store survives the toggle for a later re-enable.
+        self.assertIn(rid, engine.load_readily_schedules(self.environ))
+
+    def test_toggle_on_schedules_an_existing_side_store_entry(self):
+        engine.save_config(self.environ, {"version": 1, "readily": {"enabled": False}})
+        rid = expected_id("Backup home")
+        engine.save_readily_schedules(self.environ, {rid: {"kind": "interval", "seconds": 120}})
+        run = ScheduleSyncFakeRun(listing=(0, LIST_PAYLOAD, ""))
+
+        code, payload = self.cli(["set-config"], run, stdin_text='{"readily":{"enabled":true}}')
+
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["readily"]["enabled"], True)
+        self.assertTrue(os.path.exists(self.timer_path(rid)))
+        self.assertTrue(any("enable" in c and ("runbook-" + rid + ".timer") in c for c in run.calls))
+
+
 if __name__ == "__main__":
     unittest.main()

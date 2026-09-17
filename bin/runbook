@@ -698,7 +698,7 @@ def normalize_calendar(expr, run):
 
 
 def render_service(script_id, environ):
-    keep = ("RUNBOOK_TMUX_SOCKET", "RUNBOOK_TMUX_CONF", "XDG_CONFIG_HOME")
+    keep = ("RUNBOOK_TMUX_SOCKET", "RUNBOOK_TMUX_CONF", "XDG_CONFIG_HOME", "RUNBOOK_READILY_BIN")
     env_lines = "".join(
         f"Environment={k}={environ[k]}\n" for k in keep
         if environ.get(k) and "\n" not in environ[k])
@@ -972,7 +972,7 @@ def dispatch(argv, environ, run, stdin, kill, sleep, clock):
             config["readily"].update(incoming)
         config = _repair_config(config)
         save_config(environ, config)
-        return config
+        return {**config, **sync_schedules(load_library(path), environ, run)}
     if command == "schedule-set":
         sid = _script_id(args)
         try:

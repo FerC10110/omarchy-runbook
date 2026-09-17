@@ -104,7 +104,12 @@ class ConfigDispatchTest(unittest.TestCase):
     def test_set_config_persists_and_returns_merged_config(self):
         code, payload, fake = self.cli(["set-config"], stdin_text='{"readily":{"enabled":true}}')
         self.assertEqual((code, payload), (0, {"version": 1, "readily": {"enabled": True}}))
-        self.assertEqual(fake.calls, [])
+        # Fix I1: set-config must reconcile timers via sync_schedules, not
+        # just persist. The default CliCase fake answers every call with
+        # success, so sync_schedules returns {} (no schedule_warning) and
+        # the merged payload equals the bare config -- but it must have
+        # actually run the reconciliation (daemon-reload at minimum).
+        self.assertTrue(any(c[:3] == ["systemctl", "--user", "daemon-reload"] for c in fake.calls))
         self.assertEqual(engine.load_config(self.environ), payload)
 
     def test_config_reflects_a_previous_set_config(self):
