@@ -21,6 +21,7 @@ Panel {
   // ---- state owned by this panel
   property var library: ({ version: 1, view: { width: 960, height: 540 }, scripts: [] })
   property var sessions: ({})           // id -> { dead: bool, exit: int|null }
+  property var nextRuns: ({})           // id -> { next: "in 2h 5m" } for scheduled scripts with an active timer
   property string selectedId: ""
   property bool editorOpen: false
   property bool inputFocused: terminalPane.inputFocused
@@ -363,6 +364,30 @@ Panel {
     }
     if (selected === null && scripts.length > 0) selectedId = scripts[0].id
     if (scripts.length === 0) selectedId = ""
+    refreshSchedules()
+  }
+
+  function refreshSchedules() {
+    engineCall(["schedules"], null, function(p) {
+      if (p && p.error === undefined) nextRuns = p
+    })
+  }
+
+  readonly property var _dowNames: ({ Mon: "Mondays", Tue: "Tuesdays", Wed: "Wednesdays",
+    Thu: "Thursdays", Fri: "Fridays", Sat: "Saturdays", Sun: "Sundays" })
+  function describeSchedule(s) {
+    if (!s) return ""
+    if (s.kind === "interval") {
+      var sec = s.seconds
+      if (sec % 86400 === 0) return "Runs every " + (sec / 86400) + " day(s)"
+      if (sec % 3600 === 0) return "Runs every " + (sec / 3600) + " hour(s)"
+      return "Runs every " + Math.round(sec / 60) + " min"
+    }
+    var wk = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \*-\*-\* (\d{2}:\d{2}):00$/.exec(s.oncalendar)
+    var dy = /^\*-\*-\* (\d{2}:\d{2}):00$/.exec(s.oncalendar)
+    if (wk) return "Runs on " + _dowNames[wk[1]] + " at " + wk[2]
+    if (dy) return "Runs daily at " + dy[1]
+    return "Runs on schedule: " + s.oncalendar
   }
 
   function refreshList() {
@@ -608,6 +633,22 @@ Panel {
                 color: runbook.selected && runbook.selected.help !== "" ? runbook.foreground : runbook.dim
                 font.family: runbook.fontFamily
                 font.pixelSize: Style.font.body
+              }
+
+              Text {
+                width: parent.width
+                visible: runbook.selected !== null && runbook.selected.schedule ? true : false
+                text: {
+                  if (!runbook.selected || !runbook.selected.schedule) return ""
+                  var base = runbook.describeSchedule(runbook.selected.schedule)
+                  var nr = runbook.nextRuns[runbook.selected.id]
+                  return nr && nr.next ? base + " · next " + nr.next : base
+                }
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                color: runbook.dim
+                font.family: runbook.fontFamily
+                font.pixelSize: Style.font.bodySmall
               }
             }
           }
