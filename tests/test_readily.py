@@ -47,6 +47,39 @@ class FakeRun:
         return subprocess.CompletedProcess(argv, code, out, err)
 
 
+class CombinedFakeRun:
+    """subprocess.run stand-in for dispatch-level tests that exercise both
+    the readily binary (where/list, answered like FakeRun above) and tmux
+    (argv[0] == "tmux", answered in order like tests/fakes.FakeRun)."""
+
+    def __init__(self, where=(0, '{"folder": "/vault", "exists": true}', ""),
+                 listing=(0, '{"sections": []}', ""), tmux_answers=()):
+        self.calls = []
+        self.where = where
+        self.listing = listing
+        self.tmux_answers = list(tmux_answers)
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append(list(argv))
+        if argv[0] == "tmux":
+            code, out, err = self.tmux_answers.pop(0) if self.tmux_answers else (0, "", "")
+            return subprocess.CompletedProcess(argv, code, out, err)
+        if len(argv) > 1 and argv[1] == "where":
+            code, out, err = self.where
+        elif len(argv) > 1 and argv[1] == "list":
+            code, out, err = self.listing
+        else:
+            code, out, err = (1, "", "unexpected call: " + " ".join(argv))
+        return subprocess.CompletedProcess(argv, code, out, err)
+
+    def tails(self):
+        return [call[5:] for call in self.calls if call[:1] == ["tmux"]]
+
+
+GONE = (1, "", "can't find session: x\n")
+OK = (0, "", "")
+
+
 GOOD_ITEM = {
     "index": 0, "kind": "text", "title": "Backup home",
     "description": "Nightly backup of home dir",
@@ -81,6 +114,14 @@ DOCKER_ITEM = {
     "preview": "docker system prune -f", "lineCount": 1,
     "search": "docker system prune -f",
     "image": None, "missing": False, "hash": "mno345",
+}
+NULL_DESCRIPTION_ITEM = {
+    "index": 4, "kind": "text", "title": "No description",
+    "description": None,
+    "tags": ["runbook"], "inheritedTags": [],
+    "preview": "echo hi", "lineCount": 1,
+    "search": "echo hi",
+    "image": None, "missing": False, "hash": "pqr678",
 }
 
 LIST_PAYLOAD = json.dumps({
@@ -131,6 +172,17 @@ class ReadReadilyCommandsTest(unittest.TestCase):
         self.assertEqual(run.calls[0][1:], ["where", "--json"])
         self.assertEqual(run.calls[1][1:], ["list", "--tag", "runbook", "--json"])
 
+    def test_null_description_maps_to_empty_string_help(self):
+        payload = json.dumps({"sections": [
+            {"name": "commands", "error": None, "tags": ["runbook"],
+             "items": [NULL_DESCRIPTION_ITEM]},
+        ]})
+        run = FakeRun(listing=(0, payload, ""))
+        result = engine.read_readily_commands(self.environ, run)
+        self.assertEqual(len(result["scripts"]), 1)
+        self.assertEqual(result["scripts"][0]["help"], "")
+        self.assertIsInstance(result["scripts"][0]["help"], str)
+
     def test_where_not_exists_gives_empty_result_with_warning(self):
         run = FakeRun(where=(0, '{"folder": "", "exists": false}', ""))
         result = engine.read_readily_commands(self.environ, run)
@@ -175,13 +227,24 @@ class ReadReadilyCommandsTest(unittest.TestCase):
         self.assertIsInstance(result["warning"], str)
         self.assertEqual(run.calls, [])  # never even tried to shell out
 
-    def test_missing_commands_section_yields_no_scripts_without_warning(self):
+    def test_missing_commands_section_gives_a_gentle_warning(self):
         payload = json.dumps({"sections": [
             {"name": "docker", "error": None, "tags": [], "items": [DOCKER_ITEM]},
         ]})
         run = FakeRun(listing=(0, payload, ""))
         result = engine.read_readily_commands(self.environ, run)
         self.assertEqual(result["scripts"], [])
+        self.assertEqual(result["warning"],
+                         "No 'commands' note with #runbook items found in Readily")
+
+    def test_commands_section_present_but_empty_yields_no_warning(self):
+        payload = json.dumps({"sections": [
+            {"name": "commands", "error": None, "tags": ["runbook"], "items": []},
+        ]})
+        run = FakeRun(listing=(0, payload, ""))
+        result = engine.read_readily_commands(self.environ, run)
+        self.assertEqual(result["scripts"], [])
+        self.assertEqual(result["skipped"], 0)
         self.assertIsNone(result["warning"])
 
 
@@ -408,6 +471,131 @@ class ScheduleSetDispatchTest(unittest.TestCase):
         file_mode = stat.S_IMODE(os.stat(self.store_path).st_mode)
         self.assertEqual(dir_mode, 0o700)
         self.assertEqual(file_mode, 0o600)
+
+
+class ResolveReadilyTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.fake_bin = os.path.join(self.tmp.name, "readily")
+        with open(self.fake_bin, "w") as fh:
+            fh.write("#!/bin/sh\n")
+        os.chmod(self.fake_bin, 0o755)
+        self.environ = {"RUNBOOK_READILY_BIN": self.fake_bin}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_match_returns_the_mapped_script(self):
+        run = FakeRun(listing=(0, LIST_PAYLOAD, ""))
+        script = engine.resolve_readily(expected_id("Backup home"), self.environ, run)
+        self.assertIsNotNone(script)
+        self.assertEqual(script["name"], "Backup home")
+        self.assertEqual(script["command"], "rsync -a ~/ /backup/")
+        self.assertEqual(script["source"], "readily")
+
+    def test_miss_returns_none(self):
+        run = FakeRun(listing=(0, LIST_PAYLOAD, ""))
+        script = engine.resolve_readily("f" * 32, self.environ, run)
+        self.assertIsNone(script)
+
+
+class ReadilyDispatchCase(unittest.TestCase):
+    """Base for list/run dispatch tests that need both a resolvable readily
+    binary (env override) and a config/side-store on disk under XDG_CONFIG_HOME."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.fake_bin = os.path.join(self.tmp.name, "readily")
+        with open(self.fake_bin, "w") as fh:
+            fh.write("#!/bin/sh\n")
+        os.chmod(self.fake_bin, 0o755)
+        self.environ = {"HOME": "/h", "PATH": "/usr/bin", "XDG_CONFIG_HOME": self.tmp.name,
+                        "RUNBOOK_TMUX_SOCKET": "sock", "RUNBOOK_TMUX_CONF": "/plug/tmux.conf",
+                        "RUNBOOK_READILY_BIN": self.fake_bin}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def cli(self, argv, run, stdin_text=""):
+        out = io.StringIO()
+        code = engine.main(argv, environ=self.environ, run=run, stdin=io.StringIO(stdin_text),
+                           stdout=out, kill=lambda pid, sig: None, sleep=lambda s: None,
+                           clock=lambda: 0.0)
+        lines = out.getvalue().splitlines()
+        self.assertEqual(len(lines), 1, "exactly one JSON document")
+        return code, json.loads(lines[0])
+
+
+class ListDispatchReadilyMergeTest(ReadilyDispatchCase):
+    def test_list_merges_readily_scripts_when_enabled(self):
+        engine.save_config(self.environ, {"version": 1, "readily": {"enabled": True}})
+        rid = expected_id("Backup home")
+        engine.save_readily_schedules(self.environ, {rid: {"kind": "interval", "seconds": 120}})
+        run = CombinedFakeRun(listing=(0, LIST_PAYLOAD, ""))
+
+        code, payload = self.cli(["list"], run)
+
+        self.assertEqual(code, 0)
+        names = {s["name"]: s for s in payload["scripts"]}
+        self.assertIn("Backup home", names)
+        readily_script = names["Backup home"]
+        self.assertEqual(readily_script["id"], rid)
+        self.assertEqual(readily_script["source"], "readily")
+        self.assertIs(readily_script["readonly"], True)
+        self.assertEqual(readily_script["schedule"], {"kind": "interval", "seconds": 120})
+        self.assertEqual(payload["readily_skipped"], 3)  # image, empty, truncated
+        self.assertNotIn("readily_warning", payload)
+
+    def test_list_merged_script_has_no_schedule_key_when_side_store_is_empty(self):
+        engine.save_config(self.environ, {"version": 1, "readily": {"enabled": True}})
+        run = CombinedFakeRun(listing=(0, LIST_PAYLOAD, ""))
+        code, payload = self.cli(["list"], run)
+        readily_script = next(s for s in payload["scripts"] if s["name"] == "Backup home")
+        self.assertNotIn("schedule", readily_script)
+
+    def test_list_surfaces_readily_warning_and_omits_skipped_when_zero(self):
+        engine.save_config(self.environ, {"version": 1, "readily": {"enabled": True}})
+        run = CombinedFakeRun(where=(1, "", "boom"))
+        code, payload = self.cli(["list"], run)
+        self.assertEqual(payload["scripts"], [])
+        self.assertIn("readily_warning", payload)
+        self.assertIsInstance(payload["readily_warning"], str)
+        self.assertNotIn("readily_skipped", payload)
+
+    def test_list_is_native_only_and_makes_no_calls_when_disabled(self):
+        # readily.enabled defaults to False: no config.json has been written.
+        run = CombinedFakeRun(listing=(0, LIST_PAYLOAD, ""))
+        code, payload = self.cli(["list"], run)
+        self.assertEqual(code, 0)
+        self.assertEqual(payload, {"version": 1, "view": {"width": 960, "height": 540}, "scripts": []})
+        self.assertEqual(run.calls, [])
+
+
+class RunDispatchReadilyResolutionTest(ReadilyDispatchCase):
+    def test_run_resolves_and_launches_a_readily_script_when_enabled(self):
+        engine.save_config(self.environ, {"version": 1, "readily": {"enabled": True}})
+        rid = expected_id("Backup home")
+        run = CombinedFakeRun(listing=(0, LIST_PAYLOAD, ""), tmux_answers=[GONE, OK])
+
+        code, payload = self.cli(["run", rid, "--cols", "80", "--rows", "24"], run)
+
+        self.assertEqual((code, payload), (0, {"ok": True, "already": False}))
+        argv = run.tails()[1]
+        self.assertEqual(argv[:9], ["new-session", "-d", "-s", rid, "-x", "80", "-y", "24", "-c"])
+        self.assertIn("RUNBOOK_COMMAND=rsync -a ~/ /backup/", argv)
+
+    def test_run_unknown_or_renamed_readily_id_is_an_error(self):
+        engine.save_config(self.environ, {"version": 1, "readily": {"enabled": True}})
+        run = CombinedFakeRun(listing=(0, LIST_PAYLOAD, ""))
+        code, payload = self.cli(["run", "f" * 32], run)
+        self.assertEqual((code, payload), (1, {"error": "No such script"}))
+
+    def test_run_readily_id_with_flag_disabled_is_an_error_and_makes_no_calls(self):
+        rid = expected_id("Backup home")
+        run = CombinedFakeRun(listing=(0, LIST_PAYLOAD, ""))
+        code, payload = self.cli(["run", rid], run)
+        self.assertEqual((code, payload), (1, {"error": "No such script"}))
+        self.assertEqual(run.calls, [])
 
 
 if __name__ == "__main__":

@@ -591,6 +591,9 @@ def read_readily_commands(environ, run):
             sections = []
         commands_section = next(
             (s for s in sections if isinstance(s, dict) and s.get("name") == "commands"), None)
+        missing_section_warning = (
+            "No 'commands' note with #runbook items found in Readily"
+            if commands_section is None else None)
         items = commands_section.get("items") if isinstance(commands_section, dict) else None
 
         scripts = []
@@ -607,14 +610,24 @@ def read_readily_commands(environ, run):
             scripts.append({
                 "name": title,
                 "command": search,
-                "help": item.get("description", ""),
+                "help": item.get("description") or "",
                 "id": _readily_id(title),
                 "source": "readily",
                 "readonly": True,
             })
-        return {"scripts": scripts, "skipped": skipped, "warning": None}
+        return {"scripts": scripts, "skipped": skipped, "warning": missing_section_warning}
     except Exception as exc:
         return {"scripts": [], "skipped": 0, "warning": f"Readily error: {exc}"}
+
+
+def resolve_readily(script_id, environ, run):
+    """The mapped Readily script for this id, or None. Used both by `run`
+    (to resolve an id that isn't a native script) and by the scheduled
+    .service path (which calls `runbook run <id>`)."""
+    for script in read_readily_commands(environ, run)["scripts"]:
+        if script["id"] == script_id:
+            return script
+    return None
 
 
 # ------------------------------------------------------------------ schedule
@@ -819,7 +832,20 @@ def dispatch(argv, environ, run, stdin, kill, sleep, clock):
     path = library_path(environ)
 
     if command == "list":
-        return load_library(path)
+        library = load_library(path)
+        if load_config(environ)["readily"]["enabled"]:
+            readily = read_readily_commands(environ, run)
+            schedules = load_readily_schedules(environ)
+            for script in readily["scripts"]:
+                sched = schedules.get(script["id"])
+                if sched is not None:
+                    script["schedule"] = sched
+                library["scripts"].append(script)
+            if readily["warning"] is not None:
+                library["readily_warning"] = readily["warning"]
+            if readily["skipped"] > 0:
+                library["readily_skipped"] = readily["skipped"]
+        return library
     if command == "add":
         fields = read_stdin_json(stdin)
         library = load_library(path)
@@ -893,6 +919,8 @@ def dispatch(argv, environ, run, stdin, kill, sleep, clock):
     if command == "run":
         cols, rows = parse_size(args[1:])
         script = find_script(load_library(path), script_id)
+        if script is None and load_config(environ)["readily"]["enabled"]:
+            script = resolve_readily(script_id, environ, run)
         if script is None:
             raise RunbookError("No such script")
         try:
