@@ -296,6 +296,12 @@ Panel {
       engineCall(["resize", selectedId, "--cols", String(termCols), "--rows", String(termRows)], null, function(payload) { pollScreen() })
   }
 
+  // Clipboard via wl-copy with the text as its argument: no shell, no quoting.
+  function copyText(text) {
+    Quickshell.execDetached(["wl-copy", "--", String(text)])
+    showNotice("Copied")
+  }
+
   function showNotice(text) {
     notice = String(text || "")
     noticeTimer.restart()
@@ -448,6 +454,9 @@ Panel {
         else runbook.performDelete()
       }
       onDeleteRequested: { if (!confirm.opened && runbook.mode !== "editor") runbook.requestDelete() }
+      onTextKey: function(text) {
+        if (text === "c" && runbook.mode === "terminal" && !confirm.opened) terminalPane.copyOutput()
+      }
 
       RowLayout {
         anchors.fill: parent
@@ -618,6 +627,7 @@ Panel {
             onSendRequested: function(text) { runbook.sendLine(runbook.selectedId, text) }
             onStopRequested: runbook.stopScript(runbook.selectedId)
             onCloseRequested: runbook.closeScript(runbook.selectedId)
+            onCopyRequested: function(text) { runbook.copyText(text) }
           }
 
           EditorPane {
@@ -692,4 +702,6 @@ Panel {
       }
     }
   }
+
+
 }

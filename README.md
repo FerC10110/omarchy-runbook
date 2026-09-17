@@ -9,7 +9,9 @@ embedded terminal.
   runs anything, so a stray click on a name is harmless.
 - Each running script has its own terminal. Type a line (a password, an
   answer) and press Enter to send it. Stop interrupts the command and keeps
-  its output; Close discards the terminal.
+  its output; Close discards the terminal. Select output with the mouse and
+  press Copy (or `c`) to copy it; with nothing selected, the whole screen is
+  copied.
 - Scripts keep running while the panel is closed and survive a shell restart:
   every terminal is a session of a private tmux server (`tmux -L runbook`).
 - Drag the bottom-right corner to resize the panel; the size is remembered.
@@ -32,8 +34,9 @@ text you will want next time. Your scripts live in
 panel reloads the file when it changes.
 
 Keys inside the panel: `j`/`k` or the arrows move the selection, `x` deletes
-the selected script (with confirmation), `Esc` closes the panel or cancels the
-form, `Tab` switches to the next bar panel. Enter never runs a script.
+the selected script (with confirmation), `c` copies the terminal's selection
+or its whole output, `Esc` closes the panel or cancels the form, `Tab` switches
+to the next bar panel. Enter never runs a script.
 
 ## Notes
 

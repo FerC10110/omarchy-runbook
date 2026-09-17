@@ -29,9 +29,16 @@ Item {
   signal sendRequested(string text)
   signal stopRequested()
   signal closeRequested()
+  signal copyRequested(string text)
 
   function focusInput() { if (alive) input.forceActiveFocus() }
   function clearInput() { input.text = "" }
+
+  // The selection when there is one, otherwise the whole screen.
+  function copyOutput() {
+    var text = screenText.selectedText !== "" ? screenText.selectedText : screenText.text
+    if (text !== "") pane.copyRequested(text)
+  }
 
   TextMetrics {
     id: metrics
@@ -63,12 +70,20 @@ Item {
         // Keep the newest lines in view when the text outgrows the viewport.
         onContentHeightChanged: contentY = Math.max(0, contentHeight - height)
 
-        Text {
+        // Read-only so the output can be selected with the mouse; it never
+        // takes keyboard focus, so j/k/Esc keep reaching the panel.
+        TextEdit {
           id: screenText
           text: pane.screen ? pane.screen.text : ""
-          textFormat: Text.PlainText
-          wrapMode: Text.NoWrap
+          textFormat: TextEdit.PlainText
+          wrapMode: TextEdit.NoWrap
+          readOnly: true
+          selectByMouse: true
+          persistentSelection: true
+          activeFocusOnPress: false
           color: pane.foreground
+          selectionColor: Util.alpha(pane.accent, 0.4)
+          selectedTextColor: pane.foreground
           font.family: pane.monoFamily
           font.pixelSize: Style.font.body
         }
@@ -116,6 +131,16 @@ Item {
           pane.sendRequested(line)
         }
         Keys.onEscapePressed: function(event) { input.focus = false; event.accepted = true }
+      }
+
+      Button {
+        text: "Copy"
+        bordered: true
+        enabled: pane.screen && pane.screen.text !== ""
+        foreground: pane.foreground
+        fontFamily: pane.fontFamily
+        tooltipText: "Copy the selection, or the whole output (c)"
+        onClicked: pane.copyOutput()
       }
 
       Button {
