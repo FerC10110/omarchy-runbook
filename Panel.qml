@@ -205,6 +205,86 @@ Panel {
     })
   }
 
+  // ---- add / edit / delete
+  function startAdd() {
+    editingId = ""
+    editorPane.title = "New script"
+    editorPane.load(null)
+    editorOpen = true
+  }
+
+  function startEdit() {
+    if (selected === null) return
+    editingId = selected.id
+    editorPane.title = "Edit script"
+    editorPane.load(selected)
+    editorOpen = true
+  }
+
+  function cancelEditor() {
+    editorOpen = false
+    keyCatcher.forceActiveFocus()
+  }
+
+  function saveEditor(fields) {
+    var args = editingId === "" ? ["add"] : ["update", editingId]
+    var adding = editingId === ""
+    engineWriting = true
+    engineCall(args, fields, function(payload) {
+      engineWriting = false
+      if (!payload || payload.error !== undefined) {
+        editorPane.errorText = payload && payload.error ? payload.error : "The engine did not answer"
+        return
+      }
+      applyLibrary(payload)
+      if (adding && scripts.length > 0) selectedId = scripts[scripts.length - 1].id
+      editorOpen = false
+      keyCatcher.forceActiveFocus()
+    })
+  }
+
+  function requestDelete() {
+    if (selected === null) return
+    confirm.message = "Delete \"" + selected.name + "\"?"
+      + (sessionOf(selected.id) !== null ? " Its terminal will be closed." : "")
+    confirm.selectedIndex = 0
+    confirm.opened = true
+    keyCatcher.forceActiveFocus()
+  }
+
+  function performDelete() {
+    var id = selectedId
+    confirm.opened = false
+    if (id === "") return
+    engineWriting = true
+    engineCall(["remove", id], null, function(payload) {
+      engineWriting = false
+      if (!payload || payload.error !== undefined) return
+      dropSession(id)
+      if (screenFor === id) { screenFor = ""; screen = emptyScreen() }
+      selectedId = ""
+      applyLibrary(payload)
+    })
+  }
+
+  // ---- panel size: dragged live, saved on release, sessions resized to fit
+  function setViewSize(w, h) {
+    var maxW = panel.availableCardWidth > 0 ? panel.availableCardWidth : 4000
+    var maxH = panel.availableCardHeight > 0 ? panel.availableCardHeight : 3000
+    viewWidth = Math.round(Math.max(600, Math.min(maxW, w)))
+    viewHeight = Math.round(Math.max(360, Math.min(maxH, h)))
+  }
+
+  function commitView() {
+    engineWriting = true
+    engineCall(["set-view"], { width: viewWidth, height: viewHeight }, function(payload) {
+      engineWriting = false
+      if (payload && payload.error === undefined) library = payload
+    })
+    if (selectedId !== "" && sessionOf(selectedId) !== null)
+      engineCall(["resize", selectedId, "--cols", String(termCols), "--rows", String(termRows)], null, function(payload) { pollScreen() })
+  }
+
   function showNotice(text) {
     notice = String(text || "")
     noticeTimer.restart()
@@ -333,11 +413,27 @@ Panel {
       id: keyCatcher
       anchors.fill: parent
       // While a text field owns the keyboard, letters must reach it.
-      blocked: runbook.editorOpen || runbook.inputFocused
-      onCloseRequested: runbook.close()
-      onTabRequested: function(direction) { runbook.switchPanel(direction) }
-      onMoveRequested: function(dx, dy) { if (dy !== 0) runbook.moveSelection(dy) }
-      // Enter and Space are deliberately not wired: only ▶ runs a script.
+      blocked: (runbook.editorOpen || runbook.inputFocused) && !confirm.opened
+      onCloseRequested: {
+        if (confirm.opened) confirm.opened = false
+        else if (runbook.editorOpen) runbook.cancelEditor()
+        else runbook.close()
+      }
+      onTabRequested: function(direction) {
+        if (confirm.opened) confirm.selectedIndex = confirm.selectedIndex === 0 ? 1 : 0
+        else runbook.switchPanel(direction)
+      }
+      onMoveRequested: function(dx, dy) {
+        if (confirm.opened) { if (dx !== 0) confirm.selectedIndex = confirm.selectedIndex === 0 ? 1 : 0; return }
+        if (dy !== 0) runbook.moveSelection(dy)
+      }
+      onActivateRequested: {
+        // Enter only answers the dialog; it never runs a script.
+        if (!confirm.opened) return
+        if (confirm.selectedIndex === 0) confirm.opened = false
+        else runbook.performDelete()
+      }
+      onDeleteRequested: { if (!confirm.opened && runbook.mode !== "editor") runbook.requestDelete() }
 
       RowLayout {
         anchors.fill: parent
@@ -358,6 +454,16 @@ Panel {
             meta: runbook.scripts.length === 1 ? "1 script" : runbook.scripts.length + " scripts"
             foreground: runbook.foreground
             fontFamily: runbook.fontFamily
+
+            trailingControl: Component {
+              PanelActionButton {
+                iconText: "+"
+                tooltipText: "Add a command"
+                foreground: runbook.foreground
+                hoverColor: runbook.accent
+                onClicked: runbook.startAdd()
+              }
+            }
           }
 
           Text {
@@ -389,6 +495,28 @@ Panel {
               onSelect: runbook.selectScript(modelData.id)
               onPlay: runbook.playScript(modelData.id)
             }
+          }
+
+          RowLayout {
+            Layout.fillWidth: true
+            spacing: Style.space(6)
+            Button {
+              text: "Edit"
+              bordered: true
+              enabled: runbook.selected !== null && runbook.mode !== "editor"
+              foreground: runbook.foreground
+              fontFamily: runbook.fontFamily
+              onClicked: runbook.startEdit()
+            }
+            Button {
+              text: "Delete"
+              bordered: true
+              enabled: runbook.selected !== null && runbook.mode !== "editor"
+              foreground: runbook.urgent
+              fontFamily: runbook.fontFamily
+              onClicked: runbook.requestDelete()
+            }
+            Item { Layout.fillWidth: true }
           }
         }
 
@@ -476,6 +604,70 @@ Panel {
             onStopRequested: runbook.stopScript(runbook.selectedId)
             onCloseRequested: runbook.closeScript(runbook.selectedId)
           }
+
+          EditorPane {
+            id: editorPane
+            anchors.fill: parent
+            visible: runbook.mode === "editor"
+            foreground: runbook.foreground
+            accent: runbook.accent
+            urgent: runbook.urgent
+            dim: runbook.dim
+            fontFamily: runbook.fontFamily
+            monoFamily: runbook.monoFamily
+            onSaveRequested: function(fields) { runbook.saveEditor(fields) }
+            onCancelRequested: runbook.cancelEditor()
+          }
+        }
+      }
+
+      ConfirmDialog {
+        id: confirm
+        anchors.fill: parent
+        z: 10
+        cancelText: "Cancel"
+        confirmText: "Delete"
+        background: Color.popups.background
+        foreground: runbook.foreground
+        selectedText: runbook.accent
+        fontFamily: runbook.fontFamily
+        onCanceled: confirm.opened = false
+        onConfirmed: runbook.performDelete()
+      }
+
+      // Bottom-right grip: drag to resize. Scene coordinates, because the
+      // panel can shift while it grows (same trick as the camera plugin).
+      MouseArea {
+        id: grip
+        width: 26
+        height: 22
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        z: 5
+        hoverEnabled: true
+        preventStealing: true
+        cursorShape: Qt.SizeFDiagCursor
+        acceptedButtons: Qt.LeftButton
+        property point dragStart
+        property int startWidth: 0
+        property int startHeight: 0
+        onPressed: function(mouse) {
+          dragStart = mapToItem(null, mouse.x, mouse.y)
+          startWidth = runbook.viewWidth
+          startHeight = runbook.viewHeight
+        }
+        onPositionChanged: function(mouse) {
+          if (!pressed) return
+          var point = mapToItem(null, mouse.x, mouse.y)
+          runbook.setViewSize(startWidth + (point.x - dragStart.x), startHeight + (point.y - dragStart.y))
+        }
+        onReleased: runbook.commitView()
+        Text {
+          anchors.right: parent.right
+          anchors.bottom: parent.bottom
+          text: "◢"
+          color: grip.containsMouse || grip.pressed ? runbook.accent : runbook.dim
+          font.pixelSize: Style.font.bodySmall
         }
       }
     }
