@@ -13,8 +13,10 @@ class FakeRun:
         return subprocess.CompletedProcess(argv, code, out, err)
 
     def tails(self):
-        """Each recorded argv without the fixed 'tmux -L sock -f conf' prefix."""
-        return [call[5:] for call in self.calls]
+        """Each recorded tmux argv without the fixed 'tmux -L sock -f conf' prefix.
+        Non-tmux calls (e.g. the systemctl calls that add/update/remove now also
+        issue via sync_schedules) are not tmux invocations and are excluded."""
+        return [call[5:] for call in self.calls if call[:1] == ["tmux"]]
 
 
 class FakeClock:

@@ -2,10 +2,12 @@ import io
 import json
 import os
 import tempfile
+import time
 import unittest
 
 from _load import load
 from fakes import FakeRun
+from test_schedule import FakeRun as ScheduleFakeRun
 
 engine = load()
 
@@ -42,6 +44,19 @@ class CliCase(unittest.TestCase):
         script = engine.add_script(library, FIELDS)
         engine.save_library(self.path, library)
         return script
+
+    def main(self, argv, stdin=None, run=None):
+        """Like cli(), but takes a JSON-able stdin dict and an already-built
+        `run` double (e.g. test_schedule.FakeRun), returning just (code, payload)."""
+        fake = run if run is not None else ScheduleFakeRun()
+        text = json.dumps(stdin) if stdin is not None else ""
+        out = io.StringIO()
+        code = engine.main(argv, environ=self.environ, run=fake, stdin=io.StringIO(text),
+                           stdout=out, kill=lambda pid, sig: None, sleep=lambda s: None,
+                           clock=lambda: 0.0)
+        lines = out.getvalue().splitlines()
+        self.assertEqual(len(lines), 1, "exactly one JSON document")
+        return code, json.loads(lines[0])
 
 
 class UsageTest(CliCase):
@@ -244,3 +259,73 @@ class OSErrorTest(CliCase):
         self.assertEqual(code, 1)
         self.assertTrue(payload["error"].startswith("System error:"))
         self.assertIn("disk full", payload["error"])
+
+
+class ScheduleDispatchTest(CliCase):
+    def test_add_with_schedule_syncs_and_normalizes(self):
+        run = ScheduleFakeRun()
+        code, payload = self.main(["add"], stdin={
+            "name": "n", "command": "c", "help": "",
+            "schedule": {"kind": "calendar", "oncalendar": "*-*-* 08:00:00"}}, run=run)
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["scripts"][-1]["schedule"]["oncalendar"], "*-*-* 08:00:00")
+        self.assertTrue(any("enable" in c for c in run.calls))
+
+    def test_update_with_schedule_syncs_and_normalizes(self):
+        add_run = ScheduleFakeRun()
+        code, payload = self.main(["add"], stdin={"name": "n", "command": "c", "help": ""}, run=add_run)
+        self.assertEqual(code, 0)
+        script_id = payload["scripts"][-1]["id"]
+
+        run = ScheduleFakeRun()
+        code, payload = self.main(["update", script_id], stdin={
+            "name": "n", "command": "c", "help": "",
+            "schedule": {"kind": "calendar", "oncalendar": "*-*-* 08:00:00"}}, run=run)
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["scripts"][0]["schedule"]["oncalendar"], "*-*-* 08:00:00")
+        self.assertTrue(any("enable" in c for c in run.calls))
+
+    def test_remove_syncs(self):
+        add_run = ScheduleFakeRun()
+        code, payload = self.main(["add"], stdin={"name": "n", "command": "c", "help": ""}, run=add_run)
+        self.assertEqual(code, 0)
+        script_id = payload["scripts"][-1]["id"]
+
+        run = ScheduleFakeRun()
+        code, payload = self.main(["remove", script_id], run=run)
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["scripts"], [])
+        self.assertTrue(any(c[:3] == ["systemctl", "--user", "daemon-reload"] for c in run.calls))
+
+    def test_add_invalid_calendar_does_not_save_or_sync(self):
+        run = ScheduleFakeRun(responses={("systemd-analyze", "calendar", "bad"): ("", 1)})
+        code, payload = self.main(["add"], stdin={
+            "name": "n", "command": "c", "help": "",
+            "schedule": {"kind": "calendar", "oncalendar": "bad"}}, run=run)
+        self.assertEqual((code, payload), (1, {"error": "Not a valid schedule"}))
+        self.assertFalse(os.path.exists(self.path))
+        self.assertFalse(any("enable" in c for c in run.calls))
+
+    def test_schedules_readonly_without_systemd_returns_empty(self):
+        run = ScheduleFakeRun(available=False)
+        code, payload = self.main(["schedules"], run=run)
+        self.assertEqual(code, 0)
+        self.assertEqual(payload, {})
+
+    def test_schedules_reports_scheduled_scripts(self):
+        add_run = ScheduleFakeRun()
+        code, payload = self.main(["add"], stdin={
+            "name": "n", "command": "c", "help": "",
+            "schedule": {"kind": "calendar", "oncalendar": "*-*-* 08:00:00"}}, run=add_run)
+        self.assertEqual(code, 0)
+        script_id = payload["scripts"][-1]["id"]
+
+        future = int((time.time() + 120) * 1_000_000)
+        show_argv = ("systemctl", "--user", "show", "runbook-" + script_id + ".timer",
+                     "--property=NextElapseUSecRealtime", "--property=NextElapseUSecMonotonic")
+        run = ScheduleFakeRun(responses={show_argv: (
+            f"NextElapseUSecRealtime={future}\nNextElapseUSecMonotonic=0\n", 0)})
+        code, payload = self.main(["schedules"], run=run)
+        self.assertEqual(code, 0)
+        self.assertIn(script_id, payload)
+        self.assertTrue(payload[script_id]["next"])

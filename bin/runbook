@@ -5,6 +5,7 @@ Every subcommand prints one JSON document on stdout. Errors of our own print
 {"error": "..."} and exit 1. Data from the panel arrives as one JSON line on
 stdin; only ids and numbers travel as arguments.
 """
+import datetime
 import json
 import os
 import re
@@ -463,8 +464,16 @@ def _systemctl(run, environ, *args):
                capture_output=True, text=True)
 
 
+_BUS_UNAVAILABLE_MARKERS = ("bus", "not been booted", "failed to connect", "connection refused")
+
+
 def _bus_unavailable(result):
-    return result.returncode != 0 and "bus" in (result.stderr or "").lower()
+    return result.returncode != 0 and any(
+        marker in (result.stderr or "").lower() for marker in _BUS_UNAVAILABLE_MARKERS)
+
+
+def _unit_name(sid, ext):
+    return "runbook-" + sid + ext
 
 
 def normalize_calendar(expr, run):
@@ -481,7 +490,8 @@ def normalize_calendar(expr, run):
 def render_service(script_id, environ):
     keep = ("RUNBOOK_TMUX_SOCKET", "RUNBOOK_TMUX_CONF", "XDG_CONFIG_HOME")
     env_lines = "".join(
-        f"Environment={k}={environ[k]}\n" for k in keep if environ.get(k))
+        f"Environment={k}={environ[k]}\n" for k in keep
+        if environ.get(k) and "\n" not in environ[k])
     return (
         "[Unit]\n"
         f"Description=Runbook scheduled run of {script_id}\n\n"
@@ -509,20 +519,22 @@ def sync_schedules(library, environ, run):
     directory = unit_dir(environ)
     os.makedirs(directory, exist_ok=True)
     scheduled = {s["id"]: s["schedule"] for s in library["scripts"] if s.get("schedule")}
+    warning = {"schedule_warning":
+               "systemd user instance not available; the schedule is saved but not active"}
 
-    reload_result = _systemctl(run, environ, "daemon-reload")
-    if _bus_unavailable(reload_result):
-        return {"schedule_warning":
-                "systemd user instance not available; the schedule is saved but not active"}
+    if _bus_unavailable(_systemctl(run, environ, "daemon-reload")):
+        return warning
 
     # Escribir/activar los programados.
     for sid, schedule in scheduled.items():
         base = os.path.join(directory, "runbook-" + sid)
         _atomic_write(base + ".service", render_service(sid, environ))
         _atomic_write(base + ".timer", render_timer(schedule))
-    _systemctl(run, environ, "daemon-reload")
+    if _bus_unavailable(_systemctl(run, environ, "daemon-reload")):
+        return warning
     for sid in scheduled:
-        _systemctl(run, environ, "enable", "--now", "runbook-" + sid + ".timer")
+        if _bus_unavailable(_systemctl(run, environ, "enable", "--now", _unit_name(sid, ".timer"))):
+            return warning
 
     # Quitar los que sobran.
     for name in os.listdir(directory):
@@ -531,32 +543,66 @@ def sync_schedules(library, environ, run):
         sid = name[len("runbook-"):-len(".timer")]
         if sid in scheduled:
             continue
-        _systemctl(run, environ, "disable", "--now", name)
+        if _bus_unavailable(_systemctl(run, environ, "disable", "--now", name)):
+            return warning
         for ext in (".timer", ".service"):
             try:
-                os.unlink(os.path.join(directory, "runbook-" + sid + ext))
+                os.unlink(os.path.join(directory, _unit_name(sid, ext)))
             except OSError:
                 pass
     return {}
 
 
-def schedules_report(environ, run):
-    result = _systemctl(run, environ, "list-timers", "--all", "--no-legend", "--no-pager")
-    if result.returncode != 0:
+def _human_delay(seconds):
+    s = int(seconds)
+    if s < 60:
+        return "in <1m"
+    if s < 3600:
+        return f"in {s // 60}m"
+    if s < 86400:
+        return f"in {s // 3600}h {(s % 3600) // 60}m"
+    return f"in {s // 86400}d {(s % 86400) // 3600}h"
+
+
+def schedules_report(library, environ, run):
+    try:
+        report = {}
+        for script in library["scripts"]:
+            if not script.get("schedule"):
+                continue
+            sid = script["id"]
+            result = _systemctl(run, environ, "show", _unit_name(sid, ".timer"),
+                                 "--property=NextElapseUSecRealtime",
+                                 "--property=NextElapseUSecMonotonic")
+            if result.returncode != 0:
+                continue
+            try:
+                values = dict(
+                    line.split("=", 1) for line in (result.stdout or "").splitlines() if "=" in line)
+                realtime = int(values["NextElapseUSecRealtime"]) if "NextElapseUSecRealtime" in values else 0
+                monotonic = int(values["NextElapseUSecMonotonic"]) if "NextElapseUSecMonotonic" in values else 0
+            except ValueError:
+                continue
+            if realtime > 0:
+                seconds_until = realtime / 1_000_000 - datetime.datetime.now(datetime.timezone.utc).timestamp()
+            elif monotonic > 0:
+                seconds_until = monotonic / 1_000_000 - time.clock_gettime(time.CLOCK_MONOTONIC)
+            else:
+                continue
+            if seconds_until < 0:
+                continue
+            report[sid] = {"next": _human_delay(seconds_until)}
+        return report
+    except Exception:
         return {}
-    report = {}
-    for line in (result.stdout or "").splitlines():
-        if "runbook-" not in line:
-            continue
-        # Formato: NEXT LEFT LAST PASSED UNIT ACTIVATES
-        parts = line.split()
-        unit = next((p for p in parts if p.startswith("runbook-") and p.endswith(".timer")), None)
-        if not unit:
-            continue
-        sid = unit[len("runbook-"):-len(".timer")]
-        left = parts[parts.index(unit) - 1] if unit in parts else ""
-        report[sid] = {"next": left}
-    return report
+
+
+def _finalize_schedule(script, run):
+    """Normalize a calendar schedule via systemd-analyze before it is saved;
+    raises RunbookError if the expression is invalid."""
+    sch = script.get("schedule")
+    if sch and sch["kind"] == "calendar":
+        sch["oncalendar"] = normalize_calendar(sch["oncalendar"], run)
 
 
 def read_stdin_json(stdin):
@@ -604,16 +650,18 @@ def dispatch(argv, environ, run, stdin, kill, sleep, clock):
     if command == "add":
         fields = read_stdin_json(stdin)
         library = load_library(path)
-        add_script(library, fields)
+        script = add_script(library, fields)
+        _finalize_schedule(script, run)
         save_library(path, library)
-        return library
+        return {**library, **sync_schedules(library, environ, run)}
     if command == "update":
         script_id = _script_id(args)
         fields = read_stdin_json(stdin)
         library = load_library(path)
-        update_script(library, script_id, fields)
+        script = update_script(library, script_id, fields)
+        _finalize_schedule(script, run)
         save_library(path, library)
-        return library
+        return {**library, **sync_schedules(library, environ, run)}
     if command == "remove":
         script_id = _script_id(args)
         library = load_library(path)
@@ -624,13 +672,15 @@ def dispatch(argv, environ, run, stdin, kill, sleep, clock):
             kill_session(build_tmux(environ, run), script_id)
         except RunbookError:
             pass
-        return library
+        return {**library, **sync_schedules(library, environ, run)}
     if command == "set-view":
         view = read_stdin_json(stdin)
         library = load_library(path)
         set_view(library, view)
         save_library(path, library)
         return library
+    if command == "schedules":
+        return schedules_report(load_library(path), environ, run)
 
     tmux = build_tmux(environ, run)
     if command == "status":
