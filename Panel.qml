@@ -22,8 +22,10 @@ Panel {
   property var library: ({ version: 1, view: { width: 960, height: 540 }, scripts: [] })
   property var sessions: ({})           // id -> { dead: bool, exit: int|null }
   property var nextRuns: ({})           // id -> { next: "in 2h 5m" } for scheduled scripts with an active timer
+  property var config: ({ readily: { enabled: false } })
   property string selectedId: ""
   property bool editorOpen: false
+  property bool settingsOpen: false
   property bool inputFocused: terminalPane.inputFocused
   // The input field disables itself (or drops focus on Escape) without
   // handing focus to anything else, which would leave PanelKeyCatcher
@@ -31,7 +33,8 @@ Panel {
   onInputFocusedChanged: if (!inputFocused && opened && !editorOpen) keyCatcher.forceActiveFocus()
   property int termCols: terminalPane.cols
   property int termRows: terminalPane.rows
-  readonly property string mode: editorOpen ? "editor"
+  readonly property string mode: settingsOpen ? "settings"
+    : editorOpen ? "editor"
     : (selected !== null && sessionOf(selected.id) !== null ? "terminal" : "help")
   property string editingId: ""         // "" while adding, id while editing
   property string notice: ""
@@ -221,6 +224,7 @@ Panel {
     editorPane.title = "New script"
     editorPane.load(null)
     editorOpen = true
+    settingsOpen = false
   }
 
   function startEdit() {
@@ -229,11 +233,20 @@ Panel {
     editorPane.title = "Edit script"
     editorPane.load(selected)
     editorOpen = true
+    settingsOpen = false
   }
 
   function cancelEditor() {
     editorOpen = false
     keyCatcher.forceActiveFocus()
+  }
+
+  function toggleSettings() {
+    settingsOpen = !settingsOpen
+    if (settingsOpen) {
+      editorOpen = false
+      Qt.callLater(function() { settingsPane.forceActiveFocus() })
+    }
   }
 
   function saveEditor(fields) {
@@ -468,9 +481,11 @@ Panel {
     if (opened) {
       refreshList()
       refreshStatus()
+      engineCall(["config"], null, function(p) { if (p && p.error === undefined) runbook.config = p })
     } else {
       confirm.opened = false
       editorOpen = false
+      settingsOpen = false
     }
   }
 
@@ -490,10 +505,11 @@ Panel {
       id: keyCatcher
       anchors.fill: parent
       // While a text field owns the keyboard, letters must reach it.
-      blocked: (runbook.editorOpen || runbook.inputFocused) && !confirm.opened
+      blocked: (runbook.editorOpen || runbook.settingsOpen || runbook.inputFocused) && !confirm.opened
       onCloseRequested: {
         if (confirm.opened) confirm.opened = false
         else if (runbook.editorOpen) runbook.cancelEditor()
+        else if (runbook.settingsOpen) runbook.settingsOpen = false
         else runbook.close()
       }
       onTabRequested: function(direction) {
@@ -536,13 +552,24 @@ Panel {
             fontFamily: runbook.fontFamily
 
             trailingControl: Component {
-              PanelActionButton {
-                iconText: "+"
-                tooltipText: "Add a command"
-                enabled: runbook.mode !== "editor"
-                foreground: runbook.foreground
-                hoverColor: runbook.accent
-                onClicked: runbook.startAdd()
+              Row {
+                spacing: Style.space(6)
+                PanelActionButton {
+                  iconText: "+"
+                  tooltipText: "Add a command"
+                  enabled: runbook.mode !== "editor"
+                  foreground: runbook.foreground
+                  hoverColor: runbook.accent
+                  onClicked: runbook.startAdd()
+                }
+                PanelActionButton {
+                  iconText: "⚙"
+                  tooltipText: "Settings"
+                  enabled: runbook.mode !== "editor"
+                  foreground: runbook.foreground
+                  hoverColor: runbook.accent
+                  onClicked: runbook.toggleSettings()
+                }
               }
             }
           }
@@ -681,6 +708,66 @@ Panel {
                 color: runbook.dim
                 font.family: runbook.fontFamily
                 font.pixelSize: Style.font.bodySmall
+              }
+            }
+          }
+
+          // Settings view: a labeled toggle for the Readily integration and a
+          // link to learn what Readily is. A FocusScope (not just a
+          // Flickable) so it can own Escape the same way each EditorPane
+          // field owns it: the kit Toggle only wires Return/Enter/Space, so
+          // an Escape pressed while it has focus bubbles up to here.
+          FocusScope {
+            id: settingsPane
+            anchors.fill: parent
+            visible: runbook.mode === "settings"
+            focus: visible
+            Keys.onEscapePressed: function(event) { runbook.settingsOpen = false; event.accepted = true }
+
+            Flickable {
+              id: settingsFlick
+              anchors.fill: parent
+              clip: true
+              contentWidth: width
+              contentHeight: settingsColumn.implicitHeight
+              boundsBehavior: Flickable.StopAtBounds
+              interactive: contentHeight > height
+
+              Column {
+                id: settingsColumn
+                width: settingsFlick.width
+                spacing: Style.space(10)
+
+                Toggle {
+                  width: parent.width
+                  label: "Integrate with Readily"
+                  description: "Show #runbook-tagged commands from your Readily notes"
+                  checked: !!(runbook.config && runbook.config.readily && runbook.config.readily.enabled)
+                  foreground: runbook.foreground
+                  accent: runbook.accent
+                  fontFamily: runbook.fontFamily
+                  onClicked: {
+                    var next = !checked
+                    runbook.engineCall(["set-config"], { readily: { enabled: next } }, function(p) {
+                      if (p && p.error === undefined) { runbook.config = p; runbook.refreshList() }
+                    })
+                  }
+                }
+
+                Text {
+                  width: parent.width
+                  text: "What is Readily?"
+                  textFormat: Text.PlainText
+                  color: runbook.accent
+                  font.family: runbook.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+
+                  MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: Quickshell.execDetached(["xdg-open", "https://plugins.omarchy.org/plugin.html?id=io.github.ferc10110.readily"])
+                  }
+                }
               }
             }
           }
