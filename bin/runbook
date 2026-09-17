@@ -34,7 +34,7 @@ SCHEDULE_SECONDS = (60, 604800)  # 1 minuto a 7 días
 # <dow-set> es uno o más días unidos por "," o ".." (p.ej. "Mon,Wed,Fri" o "Mon..Wed,Fri").
 _WEEKDAY = r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)"
 _WEEKDAY_SET = _WEEKDAY + r"(?:(?:,|\.\.)" + _WEEKDAY + r")*"
-_ONCALENDAR_RE = re.compile(r"^(?:" + _WEEKDAY_SET + r" )?\*-\*-\* \d{2}:\d{2}:\d{2}$")
+_ONCALENDAR_RE = re.compile(r"^(?:" + _WEEKDAY_SET + r" )?\*-\*-\* \d{2}:\d{2}:\d{2}\Z")
 
 
 def library_path(environ):

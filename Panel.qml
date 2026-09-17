@@ -365,6 +365,7 @@ Panel {
     if (selected === null && scripts.length > 0) selectedId = scripts[0].id
     if (scripts.length === 0) selectedId = ""
     refreshSchedules()
+    if (payload.schedule_warning) showNotice(payload.schedule_warning)
   }
 
   function refreshSchedules() {

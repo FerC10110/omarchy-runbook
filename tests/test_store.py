@@ -182,6 +182,13 @@ class ValidateScheduleTest(unittest.TestCase):
         self.assertEqual(engine.validate_schedule({"kind": "calendar", "oncalendar": "Mon *-*-* 08:00:00"})["oncalendar"],
                          "Mon *-*-* 08:00:00")
 
+    def test_calendar_trailing_newline_rejected(self):
+        with self.assertRaises(engine.RunbookError) as ctx:
+            engine.validate_schedule({"kind": "calendar", "oncalendar": "*-*-* 08:00:00\n"})
+        self.assertEqual(str(ctx.exception), "Not a valid schedule")
+        self.assertEqual(engine.validate_schedule({"kind": "calendar", "oncalendar": "*-*-* 08:00:00"}),
+                         {"kind": "calendar", "oncalendar": "*-*-* 08:00:00"})
+
     def test_calendar_weekday_set_ok(self):
         for expr in ("Mon,Wed,Fri *-*-* 08:00:00", "Mon..Wed *-*-* 08:00:00",
                      "Mon..Wed,Fri *-*-* 08:00:00", "Sat,Sun *-*-* 08:00:00"):
