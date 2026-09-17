@@ -13,6 +13,7 @@ import os
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -596,6 +597,250 @@ class RunDispatchReadilyResolutionTest(ReadilyDispatchCase):
         code, payload = self.cli(["run", rid], run)
         self.assertEqual((code, payload), (1, {"error": "No such script"}))
         self.assertEqual(run.calls, [])
+
+
+class ScheduleSyncFakeRun:
+    """Answers both systemctl/systemd-analyze calls (as tests/test_schedule.py's
+    FakeRun) and the readily binary's where/list calls (as FakeRun above), for
+    sync_schedules/schedules_report tests that exercise the Readily
+    side-store union. Routed by argv[0]: "systemctl"/"systemd-analyze" go to
+    the systemd side, anything else (the resolved readily binary path) goes
+    to the where/list side, keyed on argv[1]."""
+
+    def __init__(self, where=(0, '{"folder": "/vault", "exists": true}', ""),
+                 listing=(0, '{"sections": []}', ""), responses=None, available=True):
+        self.calls = []
+        self.where = where
+        self.listing = listing
+        self.responses = responses or {}
+        self.available = available
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append(list(argv))
+        if argv[0] not in ("systemctl", "systemd-analyze"):
+            if len(argv) > 1 and argv[1] == "where":
+                code, out, err = self.where
+            elif len(argv) > 1 and argv[1] == "list":
+                code, out, err = self.listing
+            else:
+                code, out, err = (1, "", "unexpected call: " + " ".join(argv))
+            return subprocess.CompletedProcess(argv, code, out, err)
+
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        r = R()
+        if argv[:2] == ["systemd-analyze", "calendar"]:
+            r.stdout = "  Normalized form: " + argv[2] + "\n    Next elapse: ...\n"
+        if argv[0] == "systemctl" and not self.available:
+            r.returncode = 1
+            r.stderr = "Failed to connect to bus"
+        key = tuple(argv)
+        if key in self.responses:
+            r.stdout, r.returncode = self.responses[key]
+        return r
+
+
+class SyncSchedulesReadilySideStoreTest(unittest.TestCase):
+    """Task 5: sync_schedules unions the Readily side-store into the
+    scheduled set (config-gated), prunes orphaned side entries whose Readily
+    command is gone, and leaves the store untouched (but its timers swept)
+    when the toggle is disabled."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.fake_bin = os.path.join(self.tmp.name, "readily")
+        with open(self.fake_bin, "w") as fh:
+            fh.write("#!/bin/sh\n")
+        os.chmod(self.fake_bin, 0o755)
+        self.environ = {"HOME": "/h", "XDG_CONFIG_HOME": self.tmp.name,
+                        "RUNBOOK_READILY_BIN": self.fake_bin}
+        os.makedirs(engine.unit_dir(self.environ))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def lib(self, scripts=()):
+        return {"version": 1, "view": {"width": 960, "height": 540}, "scripts": list(scripts)}
+
+    def timer_path(self, sid):
+        return os.path.join(engine.unit_dir(self.environ), "runbook-" + sid + ".timer")
+
+    def touch_unit(self, sid):
+        d = engine.unit_dir(self.environ)
+        for ext in ("timer", "service"):
+            open(os.path.join(d, "runbook-" + sid + "." + ext), "w").close()
+
+    def test_enabled_side_entry_in_readily_set_is_scheduled(self):
+        engine.save_config(self.environ, {"version": 1, "readily": {"enabled": True}})
+        rid = expected_id("Backup home")
+        engine.save_readily_schedules(self.environ, {rid: {"kind": "interval", "seconds": 120}})
+        run = ScheduleSyncFakeRun(listing=(0, LIST_PAYLOAD, ""))
+
+        out = engine.sync_schedules(self.lib(), self.environ, run)
+
+        self.assertEqual(out, {})
+        self.assertTrue(os.path.exists(self.timer_path(rid)))
+        self.assertTrue(any("enable" in c and ("runbook-" + rid + ".timer") in c for c in run.calls))
+
+    def test_native_and_readily_both_scheduled_both_timers_enabled(self):
+        engine.save_config(self.environ, {"version": 1, "readily": {"enabled": True}})
+        rid = expected_id("Backup home")
+        native_sid = "n" * 32
+        engine.save_readily_schedules(self.environ, {rid: {"kind": "interval", "seconds": 120}})
+        run = ScheduleSyncFakeRun(listing=(0, LIST_PAYLOAD, ""))
+
+        out = engine.sync_schedules(
+            self.lib([{"id": native_sid, "name": "n", "command": "c", "help": "",
+                      "schedule": {"kind": "interval", "seconds": 600}}]),
+            self.environ, run)
+
+        self.assertEqual(out, {})
+        self.assertTrue(os.path.exists(self.timer_path(rid)))
+        self.assertTrue(os.path.exists(self.timer_path(native_sid)))
+        self.assertTrue(any("enable" in c and ("runbook-" + rid + ".timer") in c for c in run.calls))
+        self.assertTrue(any("enable" in c and ("runbook-" + native_sid + ".timer") in c for c in run.calls))
+
+    def test_native_schedule_is_not_overridden_by_same_id_side_entry(self):
+        engine.save_config(self.environ, {"version": 1, "readily": {"enabled": True}})
+        rid = expected_id("Backup home")
+        engine.save_readily_schedules(self.environ, {rid: {"kind": "interval", "seconds": 999}})
+        run = ScheduleSyncFakeRun(listing=(0, LIST_PAYLOAD, ""))
+
+        out = engine.sync_schedules(
+            self.lib([{"id": rid, "name": "n", "command": "c", "help": "",
+                      "schedule": {"kind": "interval", "seconds": 600}}]),
+            self.environ, run)
+
+        self.assertEqual(out, {})
+        with open(self.timer_path(rid), encoding="utf-8") as fh:
+            content = fh.read()
+        self.assertIn("OnUnitActiveSec=600", content)
+        self.assertNotIn("OnUnitActiveSec=999", content)
+        enable_calls = [c for c in run.calls if "enable" in c and ("runbook-" + rid + ".timer") in c]
+        self.assertEqual(len(enable_calls), 1)
+
+    def test_enabled_side_entry_not_in_readily_set_is_pruned_and_swept(self):
+        engine.save_config(self.environ, {"version": 1, "readily": {"enabled": True}})
+        stale_rid = "f" * 32
+        self.touch_unit(stale_rid)
+        engine.save_readily_schedules(self.environ, {stale_rid: {"kind": "interval", "seconds": 120}})
+        run = ScheduleSyncFakeRun(listing=(0, LIST_PAYLOAD, ""))
+
+        out = engine.sync_schedules(self.lib(), self.environ, run)
+
+        self.assertEqual(out, {})
+        self.assertFalse(os.path.exists(self.timer_path(stale_rid)))
+        self.assertTrue(any("disable" in c and ("runbook-" + stale_rid + ".timer") in c for c in run.calls))
+        self.assertNotIn(stale_rid, engine.load_readily_schedules(self.environ))
+
+    def test_disabled_side_entry_timer_swept_but_store_retained(self):
+        # readily.enabled left at its default (False): no config.json saved.
+        rid = expected_id("Backup home")
+        self.touch_unit(rid)
+        engine.save_readily_schedules(self.environ, {rid: {"kind": "interval", "seconds": 120}})
+        native_sid = "n" * 32
+        run = ScheduleSyncFakeRun(listing=(0, LIST_PAYLOAD, ""))
+
+        out = engine.sync_schedules(
+            self.lib([{"id": native_sid, "name": "n", "command": "c", "help": "",
+                      "schedule": {"kind": "interval", "seconds": 600}}]),
+            self.environ, run)
+
+        self.assertEqual(out, {})
+        self.assertFalse(os.path.exists(self.timer_path(rid)))
+        self.assertTrue(any("disable" in c and ("runbook-" + rid + ".timer") in c for c in run.calls))
+        self.assertTrue(os.path.exists(self.timer_path(native_sid)))
+        self.assertTrue(any("enable" in c and ("runbook-" + native_sid + ".timer") in c for c in run.calls))
+        self.assertIn(rid, engine.load_readily_schedules(self.environ))
+
+    def test_bus_unavailable_still_returns_warning_with_union_in_place(self):
+        engine.save_config(self.environ, {"version": 1, "readily": {"enabled": True}})
+        rid = expected_id("Backup home")
+        engine.save_readily_schedules(self.environ, {rid: {"kind": "interval", "seconds": 120}})
+        run = ScheduleSyncFakeRun(listing=(0, LIST_PAYLOAD, ""), available=False)
+
+        out = engine.sync_schedules(self.lib(), self.environ, run)
+
+        self.assertIn("schedule_warning", out)
+
+
+class SchedulesReportReadilySideStoreTest(unittest.TestCase):
+    """Task 5: schedules_report gains the same enabled-gated union as
+    sync_schedules, querying each in-scope id's timer the same way."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.fake_bin = os.path.join(self.tmp.name, "readily")
+        with open(self.fake_bin, "w") as fh:
+            fh.write("#!/bin/sh\n")
+        os.chmod(self.fake_bin, 0o755)
+        self.environ = {"HOME": "/h", "XDG_CONFIG_HOME": self.tmp.name,
+                        "RUNBOOK_READILY_BIN": self.fake_bin}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def lib(self, scripts=()):
+        return {"version": 1, "view": {"width": 960, "height": 540}, "scripts": list(scripts)}
+
+    def show_argv(self, sid):
+        return ("systemctl", "--user", "show", "runbook-" + sid + ".timer",
+                "--property=NextElapseUSecRealtime", "--property=NextElapseUSecMonotonic")
+
+    def future_monotonic_response(self):
+        future = int((time.clock_gettime(time.CLOCK_MONOTONIC) + 300) * 1_000_000)
+        return f"NextElapseUSecRealtime=0\nNextElapseUSecMonotonic={future}\n", 0
+
+    def test_enabled_includes_side_id_present_in_readily_set(self):
+        engine.save_config(self.environ, {"version": 1, "readily": {"enabled": True}})
+        rid = expected_id("Backup home")
+        engine.save_readily_schedules(self.environ, {rid: {"kind": "interval", "seconds": 120}})
+        run = ScheduleSyncFakeRun(listing=(0, LIST_PAYLOAD, ""),
+                                  responses={self.show_argv(rid): self.future_monotonic_response()})
+
+        report = engine.schedules_report(self.lib(), self.environ, run)
+        self.assertIn(rid, report)
+
+    def test_disabled_excludes_side_ids_and_makes_no_readily_calls(self):
+        # readily.enabled left at its default (False): no config.json saved.
+        rid = expected_id("Backup home")
+        engine.save_readily_schedules(self.environ, {rid: {"kind": "interval", "seconds": 120}})
+        run = ScheduleSyncFakeRun(listing=(0, LIST_PAYLOAD, ""),
+                                  responses={self.show_argv(rid): self.future_monotonic_response()})
+
+        report = engine.schedules_report(self.lib(), self.environ, run)
+        self.assertNotIn(rid, report)
+        self.assertFalse(any(c[0] == self.fake_bin for c in run.calls))
+
+    def test_side_id_not_in_readily_set_is_skipped(self):
+        engine.save_config(self.environ, {"version": 1, "readily": {"enabled": True}})
+        stale_rid = "f" * 32
+        engine.save_readily_schedules(self.environ, {stale_rid: {"kind": "interval", "seconds": 120}})
+        run = ScheduleSyncFakeRun(listing=(0, LIST_PAYLOAD, ""),
+                                  responses={self.show_argv(stale_rid): self.future_monotonic_response()})
+
+        report = engine.schedules_report(self.lib(), self.environ, run)
+        self.assertNotIn(stale_rid, report)
+
+    def test_native_and_readily_both_reported(self):
+        engine.save_config(self.environ, {"version": 1, "readily": {"enabled": True}})
+        rid = expected_id("Backup home")
+        native_sid = "n" * 32
+        engine.save_readily_schedules(self.environ, {rid: {"kind": "interval", "seconds": 120}})
+        run = ScheduleSyncFakeRun(listing=(0, LIST_PAYLOAD, ""), responses={
+            self.show_argv(rid): self.future_monotonic_response(),
+            self.show_argv(native_sid): self.future_monotonic_response(),
+        })
+
+        report = engine.schedules_report(
+            self.lib([{"id": native_sid, "name": "n", "command": "c", "help": "",
+                      "schedule": {"kind": "interval", "seconds": 600}}]),
+            self.environ, run)
+
+        self.assertIn(rid, report)
+        self.assertIn(native_sid, report)
 
 
 if __name__ == "__main__":

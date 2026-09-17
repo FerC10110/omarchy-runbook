@@ -705,6 +705,26 @@ def sync_schedules(library, environ, run):
     directory = unit_dir(environ)
     os.makedirs(directory, exist_ok=True)
     scheduled = {s["id"]: s["schedule"] for s in library["scripts"] if s.get("schedule")}
+
+    # Union in the Readily side-store, config-gated, with orphan cleanup:
+    # a side id whose Readily command was renamed/deleted is pruned from the
+    # store instead of being scheduled, so the stale-unit sweep below removes
+    # its timer. When disabled, the store contributes nothing here (its
+    # timers fall to the sweep too) and is left untouched -- it survives for
+    # a later re-enable.
+    side = load_readily_schedules(environ)
+    if side and load_config(environ)["readily"]["enabled"]:
+        readily_ids = {s["id"] for s in read_readily_commands(environ, run)["scripts"]}
+        orphaned = False
+        for rid in list(side):
+            if rid in readily_ids:
+                scheduled.setdefault(rid, side[rid])
+            else:
+                del side[rid]
+                orphaned = True
+        if orphaned:
+            save_readily_schedules(environ, side)
+
     warning = {"schedule_warning":
                "systemd user instance not available; the schedule is saved but not active"}
 
@@ -750,34 +770,53 @@ def _human_delay(seconds):
     return f"in {s // 86400}d {(s % 86400) // 3600}h"
 
 
+def _query_timer_next(sid, environ, run):
+    """The report entry for one timer's next elapse, or None if it has no
+    active timer / its properties are unusable. Shared by native and
+    Readily-side ids alike."""
+    result = _systemctl(run, environ, "show", _unit_name(sid, ".timer"),
+                         "--property=NextElapseUSecRealtime",
+                         "--property=NextElapseUSecMonotonic")
+    if result.returncode != 0:
+        return None
+    try:
+        values = dict(
+            line.split("=", 1) for line in (result.stdout or "").splitlines() if "=" in line)
+        realtime = int(values["NextElapseUSecRealtime"]) if "NextElapseUSecRealtime" in values else 0
+        monotonic = int(values["NextElapseUSecMonotonic"]) if "NextElapseUSecMonotonic" in values else 0
+    except ValueError:
+        return None
+    if realtime > 0:
+        seconds_until = realtime / 1_000_000 - datetime.datetime.now(datetime.timezone.utc).timestamp()
+    elif monotonic > 0:
+        seconds_until = monotonic / 1_000_000 - time.clock_gettime(time.CLOCK_MONOTONIC)
+    else:
+        return None
+    if seconds_until < 0:
+        return None
+    return {"next": _human_delay(seconds_until)}
+
+
 def schedules_report(library, environ, run):
     try:
+        ids = [s["id"] for s in library["scripts"] if s.get("schedule")]
+        seen = set(ids)
+
+        # Same config-gated union as sync_schedules: a side id only counts
+        # if its Readily command still exists in the current set.
+        side = load_readily_schedules(environ)
+        if side and load_config(environ)["readily"]["enabled"]:
+            readily_ids = {s["id"] for s in read_readily_commands(environ, run)["scripts"]}
+            for rid in side:
+                if rid in readily_ids and rid not in seen:
+                    ids.append(rid)
+                    seen.add(rid)
+
         report = {}
-        for script in library["scripts"]:
-            if not script.get("schedule"):
-                continue
-            sid = script["id"]
-            result = _systemctl(run, environ, "show", _unit_name(sid, ".timer"),
-                                 "--property=NextElapseUSecRealtime",
-                                 "--property=NextElapseUSecMonotonic")
-            if result.returncode != 0:
-                continue
-            try:
-                values = dict(
-                    line.split("=", 1) for line in (result.stdout or "").splitlines() if "=" in line)
-                realtime = int(values["NextElapseUSecRealtime"]) if "NextElapseUSecRealtime" in values else 0
-                monotonic = int(values["NextElapseUSecMonotonic"]) if "NextElapseUSecMonotonic" in values else 0
-            except ValueError:
-                continue
-            if realtime > 0:
-                seconds_until = realtime / 1_000_000 - datetime.datetime.now(datetime.timezone.utc).timestamp()
-            elif monotonic > 0:
-                seconds_until = monotonic / 1_000_000 - time.clock_gettime(time.CLOCK_MONOTONIC)
-            else:
-                continue
-            if seconds_until < 0:
-                continue
-            report[sid] = {"next": _human_delay(seconds_until)}
+        for sid in ids:
+            entry = _query_timer_next(sid, environ, run)
+            if entry is not None:
+                report[sid] = entry
         return report
     except Exception:
         return {}
