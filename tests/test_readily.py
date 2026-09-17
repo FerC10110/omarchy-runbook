@@ -22,9 +22,11 @@ from _load import load
 engine = load()
 
 
-def expected_id(title):
-    """Recomputed independently of engine._readily_id, per the spec formula."""
-    return hashlib.sha256(b"readily\0commands\0" + title.encode("utf-8")).hexdigest()[:32]
+def expected_id(title, section="commands"):
+    """Recomputed independently of engine._readily_id, per the spec formula.
+    section defaults to "commands", whose namespace equals the original formula."""
+    return hashlib.sha256(
+        b"readily\0" + section.encode("utf-8") + b"\0" + title.encode("utf-8")).hexdigest()[:32]
 
 
 class FakeRun:
@@ -149,26 +151,27 @@ class ReadReadilyCommandsTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_maps_only_good_text_items_from_the_commands_section(self):
+    def test_maps_good_text_items_from_all_notes(self):
         run = FakeRun(listing=(0, LIST_PAYLOAD, ""))
         result = engine.read_readily_commands(self.environ, run)
 
         self.assertIsNone(result["warning"])
-        self.assertEqual(result["skipped"], 3)  # image, empty, truncated
-        self.assertEqual(len(result["scripts"]), 1)
+        self.assertEqual(result["skipped"], 3)  # image, empty, truncated (all in "commands")
         self.assertTrue(result["ok"])  # a genuine, successful read
 
-        script = result["scripts"][0]
-        self.assertEqual(script["name"], "Backup home")
-        self.assertEqual(script["command"], "rsync -a ~/ /backup/")
-        self.assertEqual(script["help"], "Nightly backup of home dir")
-        self.assertEqual(script["id"], expected_id("Backup home"))
-        self.assertEqual(script["source"], "readily")
-        self.assertIs(script["readonly"], True)
-
-        # The docker section's item must never appear.
-        names = [s["name"] for s in result["scripts"]]
-        self.assertNotIn("Docker prune", names)
+        by_name = {s["name"]: s for s in result["scripts"]}
+        # The "commands" note item, with its original (back-compatible) id...
+        self.assertIn("Backup home", by_name)
+        self.assertEqual(by_name["Backup home"]["command"], "rsync -a ~/ /backup/")
+        self.assertEqual(by_name["Backup home"]["help"], "Nightly backup of home dir")
+        self.assertEqual(by_name["Backup home"]["id"], expected_id("Backup home"))
+        self.assertEqual(by_name["Backup home"]["source"], "readily")
+        self.assertIs(by_name["Backup home"]["readonly"], True)
+        # ...and the item from the OTHER note ("docker") is now included too,
+        # with a section-namespaced id.
+        self.assertIn("Docker prune", by_name)
+        self.assertEqual(by_name["Docker prune"]["command"], "docker system prune -f")
+        self.assertEqual(by_name["Docker prune"]["id"], expected_id("Docker prune", "docker"))
 
         # Calls happened in the documented order: where, then list.
         self.assertEqual(run.calls[0][1:], ["where", "--json"])
@@ -234,41 +237,53 @@ class ReadReadilyCommandsTest(unittest.TestCase):
         self.assertEqual(run.calls, [])  # never even tried to shell out
         self.assertFalse(result["ok"])
 
-    def test_missing_commands_section_gives_a_gentle_warning(self):
+    def test_items_from_a_non_commands_note_are_included(self):
         payload = json.dumps({"sections": [
-            {"name": "docker", "error": None, "tags": [], "items": [DOCKER_ITEM]},
+            {"name": "docker", "error": None, "tags": ["runbook"], "items": [DOCKER_ITEM]},
         ]})
         run = FakeRun(listing=(0, payload, ""))
         result = engine.read_readily_commands(self.environ, run)
-        self.assertEqual(result["scripts"], [])
-        self.assertEqual(result["warning"],
-                         "No 'commands' note with #runbook items found in Readily")
-        # A genuine read that just found no "commands" section: ok is still
-        # True (this is a real answer, unlike a transient failure above).
+        self.assertEqual(len(result["scripts"]), 1)
+        self.assertEqual(result["scripts"][0]["name"], "Docker prune")
+        self.assertEqual(result["scripts"][0]["id"], expected_id("Docker prune", "docker"))
+        self.assertIsNone(result["warning"])
         self.assertTrue(result["ok"])
 
-    def test_commands_section_present_but_empty_yields_no_warning(self):
+    def test_no_runbook_items_in_any_note_gives_a_gentle_warning(self):
         payload = json.dumps({"sections": [
-            {"name": "commands", "error": None, "tags": ["runbook"], "items": []},
+            {"name": "commands", "error": None, "tags": [], "items": []},
+            {"name": "docker", "error": None, "tags": [], "items": []},
         ]})
         run = FakeRun(listing=(0, payload, ""))
         result = engine.read_readily_commands(self.environ, run)
         self.assertEqual(result["scripts"], [])
         self.assertEqual(result["skipped"], 0)
-        self.assertIsNone(result["warning"])
-        self.assertTrue(result["ok"])
+        self.assertEqual(result["warning"], "No #runbook items found in Readily")
+        self.assertTrue(result["ok"])  # a genuine read that found nothing
 
 
 class ReadilyIdTest(unittest.TestCase):
-    def test_formula_matches_sha256_of_the_namespaced_title(self):
+    def test_formula_matches_sha256_of_the_namespaced_section_and_title(self):
+        section, title = "commands", "Backup home"
+        want = hashlib.sha256(
+            b"readily\0" + section.encode("utf-8") + b"\0" + title.encode("utf-8")).hexdigest()[:32]
+        self.assertEqual(engine._readily_id(section, title), want)
+        self.assertRegex(engine._readily_id(section, title), r"^[0-9a-f]{32}$")
+        self.assertEqual(len(engine._readily_id(section, title)), 32)
+
+    def test_commands_section_id_is_unchanged_from_the_original_formula(self):
+        # Back-compat: the "commands" note keeps the ids it had before Runbook
+        # read other notes, so schedules created earlier never orphan.
         title = "Backup home"
-        want = hashlib.sha256(b"readily\0commands\0" + title.encode("utf-8")).hexdigest()[:32]
-        self.assertEqual(engine._readily_id(title), want)
-        self.assertRegex(engine._readily_id(title), r"^[0-9a-f]{32}$")
-        self.assertEqual(len(engine._readily_id(title)), 32)
+        legacy = hashlib.sha256(b"readily\0commands\0" + title.encode("utf-8")).hexdigest()[:32]
+        self.assertEqual(engine._readily_id("commands", title), legacy)
 
     def test_different_titles_give_different_ids(self):
-        self.assertNotEqual(engine._readily_id("A"), engine._readily_id("B"))
+        self.assertNotEqual(engine._readily_id("commands", "A"), engine._readily_id("commands", "B"))
+
+    def test_same_title_in_different_notes_gives_different_ids(self):
+        self.assertNotEqual(engine._readily_id("commands", "Deploy"),
+                            engine._readily_id("docker", "Deploy"))
 
 
 class ReadilyBinTest(unittest.TestCase):
