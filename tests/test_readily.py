@@ -156,6 +156,7 @@ class ReadReadilyCommandsTest(unittest.TestCase):
         self.assertIsNone(result["warning"])
         self.assertEqual(result["skipped"], 3)  # image, empty, truncated
         self.assertEqual(len(result["scripts"]), 1)
+        self.assertTrue(result["ok"])  # a genuine, successful read
 
         script = result["scripts"][0]
         self.assertEqual(script["name"], "Backup home")
@@ -191,6 +192,7 @@ class ReadReadilyCommandsTest(unittest.TestCase):
         self.assertEqual(result["skipped"], 0)
         self.assertIsInstance(result["warning"], str)
         self.assertTrue(result["warning"])
+        self.assertFalse(result["ok"])  # unconfigured, not "zero commands"
 
     def test_list_nonzero_returncode_gives_empty_result_with_warning(self):
         run = FakeRun(listing=(1, "", "boom"))
@@ -199,6 +201,7 @@ class ReadReadilyCommandsTest(unittest.TestCase):
         self.assertEqual(result["skipped"], 0)
         self.assertIsInstance(result["warning"], str)
         self.assertTrue(result["warning"])
+        self.assertFalse(result["ok"])  # transient failure, not "zero commands"
 
     def test_where_nonzero_returncode_gives_empty_result_with_warning(self):
         run = FakeRun(where=(1, "", "boom"))
@@ -206,6 +209,7 @@ class ReadReadilyCommandsTest(unittest.TestCase):
         self.assertEqual(result["scripts"], [])
         self.assertEqual(result["skipped"], 0)
         self.assertIsInstance(result["warning"], str)
+        self.assertFalse(result["ok"])
 
     def test_unparseable_json_gives_empty_result_with_warning_not_raise(self):
         run = FakeRun(listing=(0, "not json", ""))
@@ -213,6 +217,7 @@ class ReadReadilyCommandsTest(unittest.TestCase):
         self.assertEqual(result["scripts"], [])
         self.assertEqual(result["skipped"], 0)
         self.assertIsInstance(result["warning"], str)
+        self.assertFalse(result["ok"])
 
     def test_binary_unresolved_gives_empty_result_with_warning_not_raise(self):
         empty_path_dir = tempfile.mkdtemp()
@@ -227,6 +232,7 @@ class ReadReadilyCommandsTest(unittest.TestCase):
         self.assertEqual(result["skipped"], 0)
         self.assertIsInstance(result["warning"], str)
         self.assertEqual(run.calls, [])  # never even tried to shell out
+        self.assertFalse(result["ok"])
 
     def test_missing_commands_section_gives_a_gentle_warning(self):
         payload = json.dumps({"sections": [
@@ -237,6 +243,9 @@ class ReadReadilyCommandsTest(unittest.TestCase):
         self.assertEqual(result["scripts"], [])
         self.assertEqual(result["warning"],
                          "No 'commands' note with #runbook items found in Readily")
+        # A genuine read that just found no "commands" section: ok is still
+        # True (this is a real answer, unlike a transient failure above).
+        self.assertTrue(result["ok"])
 
     def test_commands_section_present_but_empty_yields_no_warning(self):
         payload = json.dumps({"sections": [
@@ -247,6 +256,7 @@ class ReadReadilyCommandsTest(unittest.TestCase):
         self.assertEqual(result["scripts"], [])
         self.assertEqual(result["skipped"], 0)
         self.assertIsNone(result["warning"])
+        self.assertTrue(result["ok"])
 
 
 class ReadilyIdTest(unittest.TestCase):
@@ -765,6 +775,29 @@ class SyncSchedulesReadilySideStoreTest(unittest.TestCase):
 
         self.assertIn("schedule_warning", out)
 
+    def test_readily_read_failure_preserves_side_store_and_schedules_all_entries(self):
+        """Fix round 1 / data-loss bug: read_readily_commands degrading to an
+        empty scripts list on a TRANSIENT failure (Readily momentarily
+        unreachable) must never be mistaken for "these ids are gone" -- that
+        would silently prune and lose every Readily schedule the user set.
+        ok: False means "couldn't check": preserve the store and keep
+        scheduling every entry, don't treat it as an orphan sweep."""
+        engine.save_config(self.environ, {"version": 1, "readily": {"enabled": True}})
+        rid_a, rid_b = "a" * 32, "b" * 32
+        side = {rid_a: {"kind": "interval", "seconds": 120},
+                rid_b: {"kind": "interval", "seconds": 300}}
+        engine.save_readily_schedules(self.environ, side)
+        run = ScheduleSyncFakeRun(listing=(1, "", "boom"))  # `readily list` fails -> ok: False
+
+        out = engine.sync_schedules(self.lib(), self.environ, run)
+
+        self.assertEqual(out, {})
+        self.assertEqual(engine.load_readily_schedules(self.environ), side)  # nothing pruned
+        self.assertTrue(os.path.exists(self.timer_path(rid_a)))
+        self.assertTrue(os.path.exists(self.timer_path(rid_b)))
+        self.assertTrue(any("enable" in c and ("runbook-" + rid_a + ".timer") in c for c in run.calls))
+        self.assertTrue(any("enable" in c and ("runbook-" + rid_b + ".timer") in c for c in run.calls))
+
 
 class SchedulesReportReadilySideStoreTest(unittest.TestCase):
     """Task 5: schedules_report gains the same enabled-gated union as
@@ -841,6 +874,24 @@ class SchedulesReportReadilySideStoreTest(unittest.TestCase):
 
         self.assertIn(rid, report)
         self.assertIn(native_sid, report)
+
+    def test_readily_read_failure_still_reports_all_side_ids(self):
+        """Mirrors the sync_schedules data-loss fix: a transient Readily
+        failure must not silently drop every Readily id from the report
+        either -- their timers are being preserved by sync, so the report
+        should still be able to surface them."""
+        engine.save_config(self.environ, {"version": 1, "readily": {"enabled": True}})
+        rid_a, rid_b = "a" * 32, "b" * 32
+        engine.save_readily_schedules(self.environ, {rid_a: {"kind": "interval", "seconds": 120},
+                                                      rid_b: {"kind": "interval", "seconds": 300}})
+        run = ScheduleSyncFakeRun(listing=(1, "", "boom"), responses={
+            self.show_argv(rid_a): self.future_monotonic_response(),
+            self.show_argv(rid_b): self.future_monotonic_response(),
+        })
+
+        report = engine.schedules_report(self.lib(), self.environ, run)
+        self.assertIn(rid_a, report)
+        self.assertIn(rid_b, report)
 
 
 if __name__ == "__main__":

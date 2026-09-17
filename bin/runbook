@@ -551,7 +551,7 @@ def _readily_id(title):
 
 
 def _readily_empty(warning):
-    return {"scripts": [], "skipped": 0, "warning": warning}
+    return {"scripts": [], "skipped": 0, "warning": warning, "ok": False}
 
 
 def read_readily_commands(environ, run):
@@ -559,7 +559,13 @@ def read_readily_commands(environ, run):
     shelling out to the readily binary (argv only, no shell). Never raises:
     any failure -- binary missing, Readily unconfigured, the CLI calls
     failing, or an unparseable response -- degrades to an empty result with
-    a warning; the dispatch layer decides how to surface it."""
+    a warning; the dispatch layer decides how to surface it.
+
+    The result's "ok" flag distinguishes that degradation (ok: False, a
+    transient/config problem: callers must NOT treat its empty "scripts"
+    as meaning "no Readily commands exist") from a genuine successful read
+    (ok: True, even when it finds zero items or no "commands" section --
+    those are real answers, safe to treat as such)."""
     try:
         binary = readily_bin(environ)
         if not binary:
@@ -615,9 +621,9 @@ def read_readily_commands(environ, run):
                 "source": "readily",
                 "readonly": True,
             })
-        return {"scripts": scripts, "skipped": skipped, "warning": missing_section_warning}
+        return {"scripts": scripts, "skipped": skipped, "warning": missing_section_warning, "ok": True}
     except Exception as exc:
-        return {"scripts": [], "skipped": 0, "warning": f"Readily error: {exc}"}
+        return {"scripts": [], "skipped": 0, "warning": f"Readily error: {exc}", "ok": False}
 
 
 def resolve_readily(script_id, environ, run):
@@ -714,16 +720,29 @@ def sync_schedules(library, environ, run):
     # a later re-enable.
     side = load_readily_schedules(environ)
     if side and load_config(environ)["readily"]["enabled"]:
-        readily_ids = {s["id"] for s in read_readily_commands(environ, run)["scripts"]}
-        orphaned = False
-        for rid in list(side):
-            if rid in readily_ids:
-                scheduled.setdefault(rid, side[rid])
-            else:
-                del side[rid]
-                orphaned = True
-        if orphaned:
-            save_readily_schedules(environ, side)
+        readily = read_readily_commands(environ, run)
+        if readily["ok"]:
+            # A genuine read: an id no longer present is a real orphan
+            # (renamed/deleted) -- prune it and let the stale sweep drop
+            # its timer.
+            readily_ids = {s["id"] for s in readily["scripts"]}
+            orphaned = False
+            for rid in list(side):
+                if rid in readily_ids:
+                    scheduled.setdefault(rid, side[rid])
+                else:
+                    del side[rid]
+                    orphaned = True
+            if orphaned:
+                save_readily_schedules(environ, side)
+        else:
+            # Couldn't reach/read Readily (transient failure): we cannot
+            # tell orphans from live ids, so do NOT prune or save the
+            # store -- preserve the status quo by scheduling every side
+            # entry as-is. A permanent removal is handled by the user
+            # disabling the toggle, which tears everything down below.
+            for rid, sched in side.items():
+                scheduled.setdefault(rid, sched)
 
     warning = {"schedule_warning":
                "systemd user instance not available; the schedule is saved but not active"}
@@ -802,13 +821,21 @@ def schedules_report(library, environ, run):
         ids = [s["id"] for s in library["scripts"] if s.get("schedule")]
         seen = set(ids)
 
-        # Same config-gated union as sync_schedules: a side id only counts
-        # if its Readily command still exists in the current set.
+        # Same config-gated union as sync_schedules, same ok-gating: a side
+        # id only counts as pruned-by-absence when the read genuinely
+        # succeeded. On a transient failure (ok: False) every side id is
+        # still reported -- sync_schedules preserved its timer, so the
+        # report must not silently drop it too.
         side = load_readily_schedules(environ)
         if side and load_config(environ)["readily"]["enabled"]:
-            readily_ids = {s["id"] for s in read_readily_commands(environ, run)["scripts"]}
-            for rid in side:
-                if rid in readily_ids and rid not in seen:
+            readily = read_readily_commands(environ, run)
+            if readily["ok"]:
+                readily_ids = {s["id"] for s in readily["scripts"]}
+                candidates = (rid for rid in side if rid in readily_ids)
+            else:
+                candidates = iter(side)
+            for rid in candidates:
+                if rid not in seen:
                     ids.append(rid)
                     seen.add(rid)
 
