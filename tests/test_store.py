@@ -159,6 +159,61 @@ class ValidationTest(unittest.TestCase):
                 engine.validate_view(bad)
 
 
+class ValidateScheduleTest(unittest.TestCase):
+    def test_none_is_unscheduled(self):
+        self.assertIsNone(engine.validate_schedule(None))
+
+    def test_interval_ok(self):
+        self.assertEqual(engine.validate_schedule({"kind": "interval", "seconds": 1800}),
+                         {"kind": "interval", "seconds": 1800})
+
+    def test_interval_bounds(self):
+        for bad in (59, 604801):
+            with self.assertRaises(engine.RunbookError):
+                engine.validate_schedule({"kind": "interval", "seconds": bad})
+
+    def test_interval_seconds_must_be_int(self):
+        with self.assertRaises(engine.RunbookError):
+            engine.validate_schedule({"kind": "interval", "seconds": "600"})
+
+    def test_calendar_shape_ok(self):
+        self.assertEqual(engine.validate_schedule({"kind": "calendar", "oncalendar": "*-*-* 08:00:00"}),
+                         {"kind": "calendar", "oncalendar": "*-*-* 08:00:00"})
+        self.assertEqual(engine.validate_schedule({"kind": "calendar", "oncalendar": "Mon *-*-* 08:00:00"})["oncalendar"],
+                         "Mon *-*-* 08:00:00")
+
+    def test_calendar_bad_shape(self):
+        with self.assertRaises(engine.RunbookError):
+            engine.validate_schedule({"kind": "calendar", "oncalendar": "todos los dias"})
+
+    def test_unknown_kind(self):
+        with self.assertRaises(engine.RunbookError):
+            engine.validate_schedule({"kind": "cron", "expr": "* * * * *"})
+
+    def test_not_an_object(self):
+        with self.assertRaises(engine.RunbookError):
+            engine.validate_schedule("daily")
+
+
+class ScheduleInScriptTest(unittest.TestCase):
+    def test_validate_script_keeps_schedule_when_present(self):
+        out = engine.validate_script({"name": "a", "command": "b", "help": "",
+                                      "schedule": {"kind": "interval", "seconds": 600}})
+        self.assertEqual(out["schedule"], {"kind": "interval", "seconds": 600})
+
+    def test_validate_script_without_schedule_key_has_none(self):
+        out = engine.validate_script({"name": "a", "command": "b", "help": ""})
+        self.assertNotIn("schedule", out)
+
+    def test_normalise_rejects_bad_schedule_naming_entry(self):
+        raw = {"version": 1, "view": {"width": 960, "height": 540},
+               "scripts": [{"id": "a" * 32, "name": "ok", "command": "true", "help": "",
+                            "schedule": {"kind": "cron"}}]}
+        with self.assertRaises(engine.RunbookError) as cm:
+            engine._normalise(raw)
+        self.assertIn("ok", str(cm.exception))
+
+
 class CrudTest(unittest.TestCase):
     def setUp(self):
         self.library = engine.empty_library()

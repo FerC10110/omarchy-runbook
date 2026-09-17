@@ -28,6 +28,9 @@ DEFAULT_VIEW = {"width": 960, "height": 540}
 ID_RE = re.compile(r"^[0-9a-f]{32}$")
 NAME_MAX, COMMAND_MAX, HELP_MAX = 64, 4096, 4096
 VIEW_WIDTH, VIEW_HEIGHT = (600, 4000), (360, 3000)
+SCHEDULE_SECONDS = (60, 604800)  # 1 minuto a 7 días
+# Forma que produce la UI y acepta systemd: "[Dow ]*-*-* HH:MM:SS".
+_ONCALENDAR_RE = re.compile(r"^((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) )?\*-\*-\* \d{2}:\d{2}:\d{2}$")
 
 
 def library_path(environ):
@@ -68,7 +71,10 @@ def validate_script(fields):
         raise RunbookError("Name must not contain control characters")
     command = _text(fields, "command", COMMAND_MAX, 1, "Command")
     help_text = _text(fields, "help", HELP_MAX, 0, "Help")
-    return {"name": name, "command": command, "help": help_text}
+    result = {"name": name, "command": command, "help": help_text}
+    if "schedule" in fields:
+        result["schedule"] = validate_schedule(fields.get("schedule"))
+    return result
 
 
 def _bounded_int(value, bounds, label):
@@ -85,6 +91,27 @@ def validate_view(view):
         raise RunbookError("View must be a JSON object")
     return {"width": _bounded_int(view.get("width"), VIEW_WIDTH, "Width"),
             "height": _bounded_int(view.get("height"), VIEW_HEIGHT, "Height")}
+
+
+def validate_schedule(value):
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise RunbookError("Schedule must be a JSON object or null")
+    kind = value.get("kind")
+    if kind == "interval":
+        seconds = value.get("seconds")
+        if isinstance(seconds, bool) or not isinstance(seconds, int):
+            raise RunbookError("Interval seconds must be an integer")
+        if not SCHEDULE_SECONDS[0] <= seconds <= SCHEDULE_SECONDS[1]:
+            raise RunbookError("Interval must be between 1 minute and 7 days")
+        return {"kind": "interval", "seconds": seconds}
+    if kind == "calendar":
+        expr = value.get("oncalendar")
+        if not isinstance(expr, str) or not _ONCALENDAR_RE.match(expr):
+            raise RunbookError("Not a valid schedule")
+        return {"kind": "calendar", "oncalendar": expr}
+    raise RunbookError("Unknown schedule kind")
 
 
 def _normalise(raw):
