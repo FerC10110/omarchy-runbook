@@ -1062,5 +1062,66 @@ class SetConfigReconciliationTest(unittest.TestCase):
         self.assertTrue(any("enable" in c and ("runbook-" + rid + ".timer") in c for c in run.calls))
 
 
+class WriteCommandsReadilyMergeTest(ReadilyDispatchCase):
+    """Regression: every command that returns a library to the UI must return
+    the same native+Readily merge that `list` performs. Before this fix,
+    set-view / add / update / remove returned the native-only library, so the
+    UI -- which treats the reply as the whole list -- dropped the Readily rows
+    until the next `list`. They vanished on window resize (set-view) and on any
+    native add/edit/delete."""
+
+    FIELDS = {"name": "Ports", "command": "echo hi", "help": "h"}
+
+    def enable(self):
+        engine.save_config(self.environ, {"version": 1, "readily": {"enabled": True}})
+
+    def lib_path(self):
+        return os.path.join(self.tmp.name, "runbook", "scripts.json")
+
+    def seed_native(self):
+        library = engine.empty_library()
+        script = engine.add_script(library, self.FIELDS)
+        engine.save_library(self.lib_path(), library)
+        return script
+
+    def readily_names(self, payload):
+        return [s["name"] for s in payload["scripts"] if s.get("source") == "readily"]
+
+    def test_set_view_keeps_readily_scripts_when_enabled(self):
+        self.enable()
+        run = ScheduleSyncFakeRun(listing=(0, LIST_PAYLOAD, ""))
+        code, payload = self.cli(["set-view"], run, stdin_text='{"width": 1000, "height": 700}')
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["view"], {"width": 1000, "height": 700})
+        self.assertIn("Backup home", self.readily_names(payload))
+
+    def test_add_keeps_readily_scripts_when_enabled(self):
+        self.enable()
+        run = ScheduleSyncFakeRun(listing=(0, LIST_PAYLOAD, ""))
+        code, payload = self.cli(["add"], run, stdin_text=json.dumps(self.FIELDS))
+        self.assertEqual(code, 0)
+        self.assertIn("Ports", [s["name"] for s in payload["scripts"]])
+        self.assertIn("Backup home", self.readily_names(payload))
+
+    def test_update_keeps_readily_scripts_when_enabled(self):
+        self.enable()
+        script = self.seed_native()
+        run = ScheduleSyncFakeRun(listing=(0, LIST_PAYLOAD, ""))
+        code, payload = self.cli(["update", script["id"]], run,
+                                 stdin_text=json.dumps(dict(self.FIELDS, help="x")))
+        self.assertEqual(code, 0)
+        self.assertEqual(next(s for s in payload["scripts"] if s["id"] == script["id"])["help"], "x")
+        self.assertIn("Backup home", self.readily_names(payload))
+
+    def test_remove_keeps_readily_scripts_when_enabled(self):
+        self.enable()
+        script = self.seed_native()
+        run = ScheduleSyncFakeRun(listing=(0, LIST_PAYLOAD, ""))
+        code, payload = self.cli(["remove", script["id"]], run)
+        self.assertEqual(code, 0)
+        self.assertEqual([s for s in payload["scripts"] if s.get("source") != "readily"], [])
+        self.assertIn("Backup home", self.readily_names(payload))
+
+
 if __name__ == "__main__":
     unittest.main()

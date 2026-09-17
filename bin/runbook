@@ -654,6 +654,32 @@ def resolve_readily(script_id, environ, run):
     return None
 
 
+def merge_readily(library, environ, run):
+    """Append the config-gated Readily commands into `library` in place and
+    return it, mirroring the merge the "list" command performs.
+
+    Every command that returns a library to the UI runs this so the reply is
+    always the full native+Readily view: the panel treats each reply as the
+    whole list, so a native-only reply (from set-view/add/update/remove) would
+    drop the Readily rows until the next `list`. Native scripts are already in
+    `library["scripts"]`; this only adds the Readily rows. No-op when the
+    toggle is off."""
+    if not load_config(environ)["readily"]["enabled"]:
+        return library
+    readily = read_readily_commands(environ, run)
+    schedules = load_readily_schedules(environ)
+    for script in readily["scripts"]:
+        sched = schedules.get(script["id"])
+        if sched is not None:
+            script["schedule"] = sched
+        library["scripts"].append(script)
+    if readily["warning"] is not None:
+        library["readily_warning"] = readily["warning"]
+    if readily["skipped"] > 0:
+        library["readily_skipped"] = readily["skipped"]
+    return library
+
+
 # ------------------------------------------------------------------ schedule
 
 def unit_dir(environ):
@@ -916,27 +942,17 @@ def dispatch(argv, environ, run, stdin, kill, sleep, clock):
     path = library_path(environ)
 
     if command == "list":
-        library = load_library(path)
-        if load_config(environ)["readily"]["enabled"]:
-            readily = read_readily_commands(environ, run)
-            schedules = load_readily_schedules(environ)
-            for script in readily["scripts"]:
-                sched = schedules.get(script["id"])
-                if sched is not None:
-                    script["schedule"] = sched
-                library["scripts"].append(script)
-            if readily["warning"] is not None:
-                library["readily_warning"] = readily["warning"]
-            if readily["skipped"] > 0:
-                library["readily_skipped"] = readily["skipped"]
-        return library
+        return merge_readily(load_library(path), environ, run)
     if command == "add":
         fields = read_stdin_json(stdin)
         library = load_library(path)
         script = add_script(library, fields)
         _finalize_schedule(script, run)
         save_library(path, library)
-        return {**library, **sync_schedules(library, environ, run)}
+        # sync runs on the native library; then merge the Readily rows into
+        # the reply so the panel keeps them (it treats the reply as the list).
+        report = sync_schedules(library, environ, run)
+        return {**merge_readily(library, environ, run), **report}
     if command == "update":
         script_id = _script_id(args)
         fields = read_stdin_json(stdin)
@@ -944,7 +960,8 @@ def dispatch(argv, environ, run, stdin, kill, sleep, clock):
         script = update_script(library, script_id, fields)
         _finalize_schedule(script, run)
         save_library(path, library)
-        return {**library, **sync_schedules(library, environ, run)}
+        report = sync_schedules(library, environ, run)
+        return {**merge_readily(library, environ, run), **report}
     if command == "remove":
         script_id = _script_id(args)
         library = load_library(path)
@@ -955,13 +972,14 @@ def dispatch(argv, environ, run, stdin, kill, sleep, clock):
             kill_session(build_tmux(environ, run), script_id)
         except RunbookError:
             pass
-        return {**library, **sync_schedules(library, environ, run)}
+        report = sync_schedules(library, environ, run)
+        return {**merge_readily(library, environ, run), **report}
     if command == "set-view":
         view = read_stdin_json(stdin)
         library = load_library(path)
         set_view(library, view)
         save_library(path, library)
-        return library
+        return merge_readily(library, environ, run)
     if command == "config":
         return load_config(environ)
     if command == "set-config":
