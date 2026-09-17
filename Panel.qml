@@ -459,6 +459,7 @@ Panel {
               PanelActionButton {
                 iconText: "+"
                 tooltipText: "Add a command"
+                enabled: runbook.mode !== "editor"
                 foreground: runbook.foreground
                 hoverColor: runbook.accent
                 onClicked: runbook.startAdd()
@@ -635,14 +636,19 @@ Panel {
         onConfirmed: runbook.performDelete()
       }
 
-      // Bottom-right grip: drag to resize. Scene coordinates, because the
-      // panel can shift while it grows (same trick as the camera plugin).
+      // Bottom-right grip: drag to resize. Sits in the card's own padding
+      // (negative margins push it past the content edge into that band) so
+      // it never overlaps a content-area button like Save or Close. Scene
+      // coordinates for the drag math, because the panel can shift while it
+      // grows (same trick as the camera plugin).
       MouseArea {
         id: grip
-        width: 26
-        height: 22
+        width: panel.padding + Style.space(4)
+        height: panel.padding + Style.space(4)
         anchors.right: parent.right
         anchors.bottom: parent.bottom
+        anchors.rightMargin: -(panel.padding + 2)
+        anchors.bottomMargin: -(panel.padding + 2)
         z: 5
         hoverEnabled: true
         preventStealing: true
@@ -667,7 +673,7 @@ Panel {
           anchors.bottom: parent.bottom
           text: "◢"
           color: grip.containsMouse || grip.pressed ? runbook.accent : runbook.dim
-          font.pixelSize: Style.font.bodySmall
+          font.pixelSize: Style.font.caption
         }
       }
     }

@@ -18,7 +18,7 @@ Item {
   property string fontFamily: Style.font.family
   property string monoFamily: Style.fontFamily
 
-  readonly property bool hasFocus: nameField.activeFocus || commandField.activeFocus || helpField.activeFocus
+  readonly property bool hasFocus: nameField.activeFocus || commandField.focused || helpField.focused
 
   signal saveRequested(var fields)
   signal cancelRequested()
@@ -48,6 +48,7 @@ Item {
     property alias text: area.text
     property alias area: area
     property bool mono: false
+    readonly property bool focused: area.activeFocus
     Layout.fillWidth: true
     Layout.preferredHeight: Style.space(88)
     radius: Style.cornerRadius
