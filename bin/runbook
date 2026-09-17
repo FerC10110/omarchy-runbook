@@ -238,6 +238,48 @@ def set_view(library, view):
     return library["view"]
 
 
+# ---------------------------------------------------------------- config
+
+def config_file_path(environ):
+    base = environ.get("XDG_CONFIG_HOME") or os.path.join(
+        environ.get("HOME") or os.path.expanduser("~"), ".config")
+    return os.path.join(base, "runbook", "config.json")
+
+
+def default_config():
+    return {"version": 1, "readily": {"enabled": False}}
+
+
+def _repair_config(raw):
+    """Coerce whatever was read or merged into the exact expected shape.
+    Config is app state, not user-authored content: never raise, repair."""
+    config = default_config()
+    if isinstance(raw, dict):
+        readily = raw.get("readily")
+        if isinstance(readily, dict) and isinstance(readily.get("enabled"), bool):
+            config["readily"]["enabled"] = readily["enabled"]
+    return config
+
+
+def load_config(environ):
+    path = config_file_path(environ)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return default_config()
+    return _repair_config(raw)
+
+
+def save_config(environ, config):
+    path = config_file_path(environ)
+    directory = os.path.dirname(path)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    os.chmod(directory, 0o700)
+    _atomic_write(path, json.dumps(config, ensure_ascii=False, indent=2) + "\n")
+    return config
+
+
 # ----------------------------------------------------------------- tmux
 
 NO_SESSION_MESSAGE = "No session for this script"
@@ -686,6 +728,17 @@ def dispatch(argv, environ, run, stdin, kill, sleep, clock):
         set_view(library, view)
         save_library(path, library)
         return library
+    if command == "config":
+        return load_config(environ)
+    if command == "set-config":
+        data = read_stdin_json(stdin)
+        config = load_config(environ)
+        incoming = data.get("readily")
+        if isinstance(incoming, dict):
+            config["readily"].update(incoming)
+        config = _repair_config(config)
+        save_config(environ, config)
+        return config
     if command == "schedules":
         return schedules_report(load_library(path), environ, run)
 
