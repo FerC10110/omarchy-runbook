@@ -38,6 +38,20 @@ the selected script (with confirmation), `c` copies the terminal's selection
 or its whole output, `Esc` closes the panel or cancels the form, `Tab` switches
 to the next bar panel. Enter never runs a script.
 
+## Scheduling
+
+When you add or edit a script you can schedule it to run automatically, either
+every N minutes/hours/days or at a calendar time — daily, or weekly on one or
+more days of the week. Runbook creates a systemd user timer
+(`runbook-<id>.timer`) that runs the command on its own; open the panel to see
+the last run's terminal.
+
+- A scheduled `sudo` command waits at the password prompt until you open the
+  panel and type it. Prefer NOPASSWD or non-sudo commands for unattended runs.
+- User timers fire only while you are logged in, unless you run
+  `loginctl enable-linger <user>`.
+- `systemctl --user list-timers | grep runbook` shows what is scheduled.
+
 ## Notes
 
 - Commands run in a non-interactive bash: no aliases and nothing from your
