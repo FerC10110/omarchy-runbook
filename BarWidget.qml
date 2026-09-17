@@ -53,7 +53,7 @@ BarWidget {
     tooltipText: root.runningCount > 0
       ? "Runbook · " + root.runningCount + " running"
       : "Runbook"
-    // Accent while something runs; the bar's own colour otherwise.
+    // The bar's active colour while something runs, as for every other active widget.
     active: root.runningCount > 0
     onPressed: function(b) {
       if (b === Qt.RightButton) {

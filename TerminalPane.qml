@@ -31,6 +31,7 @@ Item {
   signal closeRequested()
 
   function focusInput() { if (alive) input.forceActiveFocus() }
+  function clearInput() { input.text = "" }
 
   TextMetrics {
     id: metrics

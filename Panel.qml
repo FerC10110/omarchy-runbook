@@ -24,6 +24,10 @@ Panel {
   property string selectedId: ""
   property bool editorOpen: false
   property bool inputFocused: terminalPane.inputFocused
+  // The input field disables itself (or drops focus on Escape) without
+  // handing focus to anything else, which would leave PanelKeyCatcher
+  // (and its j/k/x/Esc/Tab handling) unreachable until the next click.
+  onInputFocusedChanged: if (!inputFocused && opened && !editorOpen) keyCatcher.forceActiveFocus()
   property int termCols: terminalPane.cols
   property int termRows: terminalPane.rows
   readonly property string mode: editorOpen ? "editor"
@@ -63,6 +67,7 @@ Panel {
   function isAlive(id) { var s = sessionOf(id); return s !== null && s.dead === false }
 
   function selectScript(id) {
+    if (editorOpen) return
     selectedId = id
     editorOpen = false
     if (isAlive(id)) Qt.callLater(terminalPane.focusInput)
@@ -93,6 +98,7 @@ Panel {
   // ▶: start a session when there is none or it is dead; only select when it
   // is alive (the terminal comes into view because mode turns "terminal").
   function playScript(id) {
+    if (editorOpen) return
     selectScript(id)
     if (isAlive(id)) return
     engineCall(["run", id, "--cols", String(termCols), "--rows", String(termRows)], null, function(payload) {
@@ -180,6 +186,8 @@ Panel {
   onSelectedIdChanged: {
     // A different script: show nothing stale while its first screen arrives.
     if (screenFor !== selectedId) screen = emptyScreen()
+    // The input line is per-selection: never carry typed text to another script.
+    terminalPane.clearInput()
   }
 
   function sendLine(id, text) {
@@ -202,6 +210,7 @@ Panel {
       screenEpoch++
       dropSession(id)
       if (screenFor === id) { screenFor = ""; screen = emptyScreen() }
+      terminalPane.clearInput()
     })
   }
 
@@ -269,18 +278,20 @@ Panel {
 
   // ---- panel size: dragged live, saved on release, sessions resized to fit
   function setViewSize(w, h) {
-    var maxW = panel.availableCardWidth > 0 ? panel.availableCardWidth : 4000
-    var maxH = panel.availableCardHeight > 0 ? panel.availableCardHeight : 3000
+    var maxW = Math.min(4000, panel.availableCardWidth > 0 ? panel.availableCardWidth : 4000)
+    var maxH = Math.min(3000, panel.availableCardHeight > 0 ? panel.availableCardHeight : 3000)
     viewWidth = Math.round(Math.max(600, Math.min(maxW, w)))
     viewHeight = Math.round(Math.max(360, Math.min(maxH, h)))
   }
 
   function commitView() {
-    engineWriting = true
-    engineCall(["set-view"], { width: viewWidth, height: viewHeight }, function(payload) {
-      engineWriting = false
-      if (payload && payload.error === undefined) library = payload
-    })
+    if (!library.view || library.view.width !== viewWidth || library.view.height !== viewHeight) {
+      engineWriting = true
+      engineCall(["set-view"], { width: viewWidth, height: viewHeight }, function(payload) {
+        engineWriting = false
+        if (payload && payload.error === undefined) library = payload
+      })
+    }
     if (selectedId !== "" && sessionOf(selectedId) !== null)
       engineCall(["resize", selectedId, "--cols", String(termCols), "--rows", String(termRows)], null, function(payload) { pollScreen() })
   }
@@ -394,6 +405,9 @@ Panel {
     if (opened) {
       refreshList()
       refreshStatus()
+    } else {
+      confirm.opened = false
+      editorOpen = false
     }
   }
 

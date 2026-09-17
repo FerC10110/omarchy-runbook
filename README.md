@@ -26,7 +26,7 @@ Requires tmux 3.2 or newer (Omarchy ships 3.7). Move the icon with
 
 ## Usage
 
-Click the icon (or `+`) to add a script: a name, the command, and the help
+Click the icon to open the panel and press `+` to add a script: a name, the command, and the help
 text you will want next time. Your scripts live in
 `~/.config/runbook/scripts.json` (mode 600) and can be edited by hand; the
 panel reloads the file when it changes.
@@ -44,7 +44,8 @@ form, `Tab` switches to the next bar panel. Enter never runs a script.
 - The password you type for `sudo` goes straight to the terminal and is never
   stored.
 - To reach a session from a real terminal: `tmux -L runbook attach -t <id>`
-  (the id is in `scripts.json`).
+  (the id is in `scripts.json`) (while a client is attached, the pane follows
+  that terminal's size instead of the panel's).
 
 ## Development
 
