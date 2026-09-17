@@ -85,6 +85,23 @@ Item {
              schedule: scheduleObject() }
   }
 
+  // "" when the schedule (if any) is complete enough to save; a message
+  // otherwise. Daily/Weekly rely on the kit TextField's acceptableInput,
+  // which inputMask: "99:99" makes false for an empty or half-typed time —
+  // without this gate, scheduleObject()'s "00:00" backstop would silently
+  // turn an incomplete time into a real midnight schedule the user never
+  // asked for, and *-*-* 00:00:00 is a valid expression the engine cannot
+  // tell apart from an intentional one.
+  function scheduleError() {
+    if (scheduleMode === "daily" && !dailyTime.acceptableInput)
+      return "Enter a complete time as HH:MM"
+    if (scheduleMode === "weekly" && !weeklyTime.acceptableInput)
+      return "Enter a complete time as HH:MM"
+    if (scheduleMode === "every" && (everyN.text === "" || parseInt(everyN.text) < 1))
+      return "Enter how often (a whole number of " + everyUnit + "s)"
+    return ""
+  }
+
   component FieldLabel: Text {
     Layout.fillWidth: true
     textFormat: Text.PlainText
@@ -163,7 +180,7 @@ Item {
     TextBox { id: helpField; Layout.fillHeight: true }
 
     FieldLabel { text: "Schedule" }
-    RowLayout {
+    Flow {
       Layout.fillWidth: true
       spacing: Style.space(6)
       Button {
@@ -198,7 +215,6 @@ Item {
         fontFamily: editor.fontFamily
         onClicked: editor.scheduleMode = "weekly"
       }
-      Item { Layout.fillWidth: true }
     }
 
     RowLayout {
@@ -266,7 +282,7 @@ Item {
       spacing: Style.space(6)
       visible: editor.scheduleMode === "weekly"
 
-      RowLayout {
+      Flow {
         Layout.fillWidth: true
         spacing: Style.space(4)
         Repeater {
@@ -280,7 +296,6 @@ Item {
             onClicked: editor.weeklyDow = modelData
           }
         }
-        Item { Layout.fillWidth: true }
       }
       TextField {
         id: weeklyTime
@@ -332,7 +347,11 @@ Item {
         bordered: true
         foreground: editor.accent
         fontFamily: editor.fontFamily
-        onClicked: editor.saveRequested(editor.fields())
+        onClicked: {
+          var se = editor.scheduleError()
+          if (se !== "") { editor.errorText = se; return }
+          editor.saveRequested(editor.fields())
+        }
       }
     }
   }
