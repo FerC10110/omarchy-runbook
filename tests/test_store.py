@@ -59,15 +59,60 @@ class LoadSaveTest(unittest.TestCase):
         loaded = engine.load_library(self.path)
         self.assertEqual(loaded["scripts"], [script])
 
-    def test_load_repairs_bad_view_and_drops_broken_scripts(self):
+    def test_load_repairs_bad_view_when_scripts_are_valid(self):
+        os.makedirs(os.path.dirname(self.path))
+        with open(self.path, "w") as fh:
+            json.dump({"version": 1, "view": {"width": 10, "height": "x"},
+                       "scripts": [{"id": "a" * 32, "name": "ok", "command": "true", "help": ""}]}, fh)
+        loaded = engine.load_library(self.path)
+        self.assertEqual(loaded["view"], {"width": 960, "height": 540})
+        self.assertEqual([s["id"] for s in loaded["scripts"]], ["a" * 32])
+
+    def test_load_raises_on_a_broken_script_instead_of_dropping_it(self):
         os.makedirs(os.path.dirname(self.path))
         with open(self.path, "w") as fh:
             json.dump({"version": 1, "view": {"width": 10, "height": "x"},
                        "scripts": [{"id": "nope", "name": "a", "command": "b", "help": ""},
                                    {"id": "a" * 32, "name": "ok", "command": "true", "help": ""}]}, fh)
-        loaded = engine.load_library(self.path)
-        self.assertEqual(loaded["view"], {"width": 960, "height": 540})
-        self.assertEqual([s["id"] for s in loaded["scripts"]], ["a" * 32])
+        with self.assertRaises(engine.RunbookError) as ctx:
+            engine.load_library(self.path)
+        self.assertEqual(str(ctx.exception), 'scripts.json: script 1 ("a") has an invalid id')
+
+    def test_load_raises_naming_the_entry_on_an_invalid_field(self):
+        os.makedirs(os.path.dirname(self.path))
+        with open(self.path, "w") as fh:
+            json.dump({"version": 1,
+                       "scripts": [{"id": "a" * 32, "name": "ok", "command": "true", "help": ""},
+                                   {"id": "b" * 32, "name": "", "command": "true", "help": ""}]}, fh)
+        with self.assertRaises(engine.RunbookError) as ctx:
+            engine.load_library(self.path)
+        self.assertEqual(str(ctx.exception), 'scripts.json: script 2 (""): Name must be 1-64 characters')
+
+    def test_load_raises_scripts_must_be_a_list(self):
+        os.makedirs(os.path.dirname(self.path))
+        with open(self.path, "w") as fh:
+            json.dump({"version": 1, "scripts": "nope"}, fh)
+        with self.assertRaises(engine.RunbookError) as ctx:
+            engine.load_library(self.path)
+        self.assertEqual(str(ctx.exception), "scripts.json: scripts must be a list")
+
+    def test_load_raises_when_a_script_is_not_an_object(self):
+        os.makedirs(os.path.dirname(self.path))
+        with open(self.path, "w") as fh:
+            json.dump({"version": 1, "scripts": [{"id": "a" * 32, "name": "ok", "command": "true"}, "nope"]}, fh)
+        with self.assertRaises(engine.RunbookError) as ctx:
+            engine.load_library(self.path)
+        self.assertEqual(str(ctx.exception), "scripts.json: script 2 is not an object")
+
+    def test_load_raises_on_duplicate_id(self):
+        os.makedirs(os.path.dirname(self.path))
+        dup = "a" * 32
+        with open(self.path, "w") as fh:
+            json.dump({"version": 1, "scripts": [{"id": dup, "name": "one", "command": "true"},
+                                                  {"id": dup, "name": "two", "command": "true"}]}, fh)
+        with self.assertRaises(engine.RunbookError) as ctx:
+            engine.load_library(self.path)
+        self.assertEqual(str(ctx.exception), "scripts.json: duplicate id " + dup)
 
 
 class ValidationTest(unittest.TestCase):

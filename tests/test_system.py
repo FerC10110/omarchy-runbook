@@ -2,6 +2,7 @@
 
 Skipped when tmux is not installed. The server is killed at the end.
 """
+import contextlib
 import io
 import json
 import os
@@ -31,6 +32,8 @@ class SystemTest(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         subprocess.run(["tmux", "-L", SOCKET, "kill-server"], capture_output=True)
+        with contextlib.suppress(OSError):
+            os.unlink(os.path.join(os.environ.get("TMUX_TMPDIR", "/tmp"), f"tmux-{os.getuid()}", SOCKET))
         cls.tmp.cleanup()
 
     def cli(self, argv, stdin_text=""):
@@ -140,6 +143,16 @@ class SystemTest(unittest.TestCase):
         self.assertEqual((code, payload), (0, {"ok": True, "already": True}))
         code, status = self.cli(["status"])
         self.assertEqual(status["sessions"][sid], {"dead": False, "exit": None})
+        self.cli(["close", sid])
+
+    def test_run_after_exit_starts_a_fresh_session(self):
+        sid = self.add("runner", "echo one")
+        self.run_script(sid)
+        screen = self.wait_for(sid, lambda s: s["dead"])
+        self.assertEqual(screen["text"], "one")
+        self.run_script(sid)
+        screen = self.wait_for(sid, lambda s: s["dead"])
+        self.assertEqual(screen["text"], "one")
         self.cli(["close", sid])
 
     def test_local_bin_is_on_path(self):

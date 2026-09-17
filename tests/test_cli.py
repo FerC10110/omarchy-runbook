@@ -104,6 +104,31 @@ class LibraryCommandsTest(CliCase):
         self.assertEqual(engine.load_library(self.path)["view"], {"width": 1000, "height": 700})
 
 
+class MalformedLibraryTest(CliCase):
+    def write_malformed(self):
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        data = {"version": 1, "view": {"width": 960, "height": 540},
+                "scripts": [{"id": "nope", "name": "a", "command": "b", "help": ""}]}
+        with open(self.path, "w") as fh:
+            json.dump(data, fh)
+        with open(self.path, "rb") as fh:
+            return fh.read()
+
+    def test_set_view_does_not_write_when_the_library_is_malformed(self):
+        original_bytes = self.write_malformed()
+        code, payload, _ = self.cli(["set-view"], stdin_text='{"width": 700, "height": 400}')
+        self.assertEqual(code, 1)
+        self.assertIn("error", payload)
+        with open(self.path, "rb") as fh:
+            self.assertEqual(fh.read(), original_bytes)
+
+    def test_list_reports_the_same_error(self):
+        self.write_malformed()
+        code, payload, _ = self.cli(["list"])
+        self.assertEqual(code, 1)
+        self.assertIn("error", payload)
+
+
 class RunTest(CliCase):
     def test_run_starts_a_session_with_the_stored_command(self):
         script = self.seed()
@@ -202,3 +227,20 @@ class TmuxWiringTest(CliCase):
         _, _, fake = self.cli(["status"], answers=[(0, "", "")])
         self.assertEqual(fake.calls[0][:3], ["tmux", "-L", "runbook"])
         self.assertEqual(fake.calls[0][4], os.path.join(engine.PLUGIN_DIR, "tmux.conf"))
+
+
+class OSErrorTest(CliCase):
+    def test_an_os_error_during_save_is_reported_as_a_system_error(self):
+        original = engine.save_library
+
+        def boom(path, library):
+            raise OSError("disk full")
+
+        engine.save_library = boom
+        try:
+            code, payload, _ = self.cli(["add"], stdin_text=json.dumps(FIELDS))
+        finally:
+            engine.save_library = original
+        self.assertEqual(code, 1)
+        self.assertTrue(payload["error"].startswith("System error:"))
+        self.assertIn("disk full", payload["error"])

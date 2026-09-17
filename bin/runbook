@@ -95,14 +95,28 @@ def _normalise(raw):
         library["view"] = validate_view(raw.get("view"))
     except RunbookError:
         pass
-    for item in raw.get("scripts") or []:
-        if not isinstance(item, dict) or not ID_RE.match(str(item.get("id", ""))):
-            continue
+    scripts = raw.get("scripts")
+    if scripts is None:
+        scripts = []
+    elif not isinstance(scripts, list):
+        raise RunbookError("scripts.json: scripts must be a list")
+    seen_ids = set()
+    for index, item in enumerate(scripts, start=1):
+        if not isinstance(item, dict):
+            raise RunbookError(f"scripts.json: script {index} is not an object")
+        name = item.get("name")
+        label = name if isinstance(name, str) else str(name)
+        script_id = item.get("id")
+        if not isinstance(script_id, str) or not ID_RE.match(script_id):
+            raise RunbookError(f'scripts.json: script {index} ("{label}") has an invalid id')
+        if script_id in seen_ids:
+            raise RunbookError(f"scripts.json: duplicate id {script_id}")
+        seen_ids.add(script_id)
         try:
             script = validate_script(item)
-        except RunbookError:
-            continue
-        script["id"] = item["id"]
+        except RunbookError as exc:
+            raise RunbookError(f'scripts.json: script {index} ("{label}"): {exc}') from exc
+        script["id"] = script_id
         library["scripts"].append(script)
     return library
 
@@ -365,7 +379,7 @@ def _wait_dead(tmux, script_id, deadline, sleep, clock, poll):
 def _signal_group(kill, pid, sig):
     try:
         kill(-pid, sig)
-    except ProcessLookupError:
+    except OSError:
         pass
 
 
@@ -529,6 +543,9 @@ def main(argv=None, *, environ=None, run=subprocess.run, stdin=None, stdout=None
         code = 0
     except RunbookError as exc:
         payload = {"error": str(exc)}
+        code = 1
+    except OSError as exc:
+        payload = {"error": "System error: " + str(exc)}
         code = 1
     stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
     stdout.flush()
