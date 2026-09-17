@@ -6,10 +6,12 @@ Every subcommand prints one JSON document on stdout. Errors of our own print
 stdin; only ids and numbers travel as arguments.
 """
 import datetime
+import hashlib
 import json
 import os
 import re
 import secrets
+import shutil
 import signal
 import subprocess
 import sys
@@ -491,6 +493,96 @@ def build_tmux(environ, run):
     socket = environ.get("RUNBOOK_TMUX_SOCKET") or "runbook"
     conf = environ.get("RUNBOOK_TMUX_CONF") or os.path.join(PLUGIN_DIR, "tmux.conf")
     return Tmux(socket, conf, run=run)
+
+
+# ------------------------------------------------------------------ readily
+
+READILY_PLUGIN_ID = "io.github.ferc10110.readily"
+
+
+def readily_bin(environ):
+    """Locate the readily binary: env override, sibling plugin, then PATH."""
+    override = environ.get("RUNBOOK_READILY_BIN")
+    if override and os.path.isfile(override):
+        return override
+    sibling = os.path.join(os.path.dirname(PLUGIN_DIR), READILY_PLUGIN_ID, "bin", "readily")
+    if os.path.isfile(sibling):
+        return sibling
+    return shutil.which("readily", path=environ.get("PATH"))
+
+
+def _readily_id(title):
+    """Stable synthetic id for a Readily item, keyed on its title (the ## heading).
+    Stable across command edits; changes only if the title is renamed in Obsidian."""
+    digest = hashlib.sha256(b"readily\0commands\0" + title.encode("utf-8")).hexdigest()
+    return digest[:32]
+
+
+def _readily_empty(warning):
+    return {"scripts": [], "skipped": 0, "warning": warning}
+
+
+def read_readily_commands(environ, run):
+    """Read the #runbook-tagged items from Readily's "commands" note by
+    shelling out to the readily binary (argv only, no shell). Never raises:
+    any failure -- binary missing, Readily unconfigured, the CLI calls
+    failing, or an unparseable response -- degrades to an empty result with
+    a warning; the dispatch layer decides how to surface it."""
+    try:
+        binary = readily_bin(environ)
+        if not binary:
+            return _readily_empty("Readily not found")
+
+        where = run([binary, "where", "--json"], capture_output=True, text=True)
+        if where.returncode != 0:
+            return _readily_empty("Readily is not available")
+        try:
+            where_data = json.loads(where.stdout or "")
+        except ValueError:
+            return _readily_empty("Readily returned an unexpected response")
+        if not isinstance(where_data, dict) or not where_data.get("exists"):
+            return _readily_empty("Readily has no folder configured")
+
+        listing = run([binary, "list", "--tag", "runbook", "--json"],
+                      capture_output=True, text=True)
+        if listing.returncode != 0:
+            return _readily_empty("Readily list failed")
+        try:
+            listing_data = json.loads(listing.stdout or "")
+        except ValueError:
+            return _readily_empty("Readily returned an unexpected response")
+        if not isinstance(listing_data, dict):
+            return _readily_empty("Readily returned an unexpected response")
+
+        sections = listing_data.get("sections")
+        if not isinstance(sections, list):
+            sections = []
+        commands_section = next(
+            (s for s in sections if isinstance(s, dict) and s.get("name") == "commands"), None)
+        items = commands_section.get("items") if isinstance(commands_section, dict) else None
+
+        scripts = []
+        skipped = 0
+        for item in items or []:
+            title = item.get("title") if isinstance(item, dict) else None
+            search = item.get("search") if isinstance(item, dict) else None
+            if (not isinstance(item, dict)
+                    or item.get("kind") != "text"
+                    or not isinstance(search, str) or not search or len(search) >= COMMAND_MAX
+                    or not isinstance(title, str) or not title):
+                skipped += 1
+                continue
+            scripts.append({
+                "name": title,
+                "command": search,
+                "help": item.get("description", ""),
+                "id": _readily_id(title),
+                "source": "readily",
+                "readonly": True,
+            })
+        return {"scripts": scripts, "skipped": skipped, "warning": None}
+    except Exception as exc:
+        return {"scripts": [], "skipped": 0, "warning": f"Readily error: {exc}"}
 
 
 # ------------------------------------------------------------------ schedule
