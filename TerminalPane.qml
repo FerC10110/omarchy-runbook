@@ -64,14 +64,27 @@ Item {
         anchors.fill: parent
         anchors.margins: Style.space(6)
         clip: true
+        // Not interactive so a mouse drag reaches the TextEdit and selects
+        // text instead of panning; the wheel still scrolls (WheelHandler).
+        interactive: false
         contentWidth: Math.max(width, screenText.implicitWidth)
         contentHeight: Math.max(height, screenText.implicitHeight)
         boundsBehavior: Flickable.StopAtBounds
         // Keep the newest lines in view when the text outgrows the viewport.
         onContentHeightChanged: contentY = Math.max(0, contentHeight - height)
 
-        // Read-only so the output can be selected with the mouse; it never
-        // takes keyboard focus, so j/k/Esc keep reaching the panel.
+        WheelHandler {
+          onWheel: function(event) {
+            var maxY = Math.max(0, viewport.contentHeight - viewport.height)
+            var maxX = Math.max(0, viewport.contentWidth - viewport.width)
+            viewport.contentY = Math.max(0, Math.min(maxY, viewport.contentY - event.angleDelta.y))
+            viewport.contentX = Math.max(0, Math.min(maxX, viewport.contentX - event.angleDelta.x))
+          }
+        }
+
+        // Read-only and never takes keyboard focus (j/k/Esc keep reaching the
+        // panel); a mouse drag selects the output. No overlay MouseArea, which
+        // would swallow the drag before the TextEdit could select.
         TextEdit {
           id: screenText
           text: pane.screen ? pane.screen.text : ""
@@ -86,11 +99,6 @@ Item {
           selectedTextColor: pane.foreground
           font.family: pane.monoFamily
           font.pixelSize: Style.font.body
-        }
-
-        MouseArea {
-          anchors.fill: parent
-          onClicked: pane.focusInput()
         }
       }
     }
