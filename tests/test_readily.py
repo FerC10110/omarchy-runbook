@@ -401,6 +401,38 @@ class LoadSaveReadilySchedulesTest(unittest.TestCase):
             fh.write("[]")
         self.assertEqual(engine.load_readily_schedules(self.environ), {})
 
+    def _write_raw(self, obj):
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        with open(self.path, "w", encoding="utf-8") as fh:
+            json.dump(obj, fh)
+
+    def test_drops_a_non_id_key_but_keeps_a_valid_entry(self):
+        """Fix round 2: the side-store is a user-editable file. A hand-edited
+        key that isn't 32-hex must never reach _unit_base -- that's a
+        path-traversal unit write waiting to happen."""
+        valid = "a" * 32
+        self._write_raw({
+            "../../evil": {"kind": "interval", "seconds": 120},
+            "xyz": {"kind": "interval", "seconds": 120},
+            valid: {"kind": "interval", "seconds": 300},
+        })
+        self.assertEqual(engine.load_readily_schedules(self.environ),
+                         {valid: {"kind": "interval", "seconds": 300}})
+
+    def test_drops_malformed_or_null_values_but_keeps_valid_entries(self):
+        """Fix round 2: a malformed value must never reach render_timer --
+        that's an uncaught KeyError crashing sync_schedules."""
+        valid = "a" * 32
+        self._write_raw({
+            valid: {"kind": "interval", "seconds": 300},
+            "b" * 32: {},                        # no "kind" at all
+            "c" * 32: {"kind": "interval"},       # interval missing "seconds"
+            "d" * 32: {"kind": "bogus"},          # unknown kind
+            "e" * 32: None,                       # "no schedule": has no business persisting
+        })
+        self.assertEqual(engine.load_readily_schedules(self.environ),
+                         {valid: {"kind": "interval", "seconds": 300}})
+
 
 class ScheduleSetDispatchTest(unittest.TestCase):
     def setUp(self):
@@ -797,6 +829,70 @@ class SyncSchedulesReadilySideStoreTest(unittest.TestCase):
         self.assertTrue(os.path.exists(self.timer_path(rid_b)))
         self.assertTrue(any("enable" in c and ("runbook-" + rid_a + ".timer") in c for c in run.calls))
         self.assertTrue(any("enable" in c and ("runbook-" + rid_b + ".timer") in c for c in run.calls))
+
+    def test_tampered_store_does_not_traverse_or_raise(self):
+        """Fix round 2 / anti-traversal + anti-crash guard: a hand-edited
+        side-store with a bad key (path-traversal-shaped) and a malformed
+        value must not make sync_schedules write outside unit_dir, and must
+        not raise -- only the well-formed entry gets scheduled.
+
+        Uses a failing Readily read (ok: False) on purpose: under ok: True
+        the round-1 orphan-prune already happens to drop any key that isn't
+        a currently-live Readily id (garbage never matches), which would
+        mask this load-time validation bug. The ok: False "preserve
+        everything" branch iterates every raw side entry unconditionally,
+        which is exactly where an unvalidated key/value would reach
+        render_service/render_timer/_atomic_write."""
+        engine.save_config(self.environ, {"version": 1, "readily": {"enabled": True}})
+        good_rid = "a" * 32
+        bad_value_id = "f" * 32
+        path = engine.readily_schedules_path(self.environ)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({
+                "../../evil": {"kind": "interval", "seconds": 120},  # bad key
+                bad_value_id: {},                                    # bad value (no "kind")
+                good_rid: {"kind": "interval", "seconds": 300},      # well-formed
+            }, fh)
+        run = ScheduleSyncFakeRun(listing=(1, "", "boom"))  # readily list fails -> ok: False
+
+        out = engine.sync_schedules(self.lib(), self.environ, run)  # must not raise
+
+        self.assertEqual(out, {})
+        # No traversal write and no stray file from the bad key, anywhere
+        # under XDG_CONFIG_HOME.
+        stray = [name for _, dirs, files in os.walk(self.tmp.name) for name in dirs + files
+                if "evil" in name]
+        self.assertEqual(stray, [])
+        # The malformed-value id was dropped on load, never scheduled.
+        self.assertFalse(os.path.exists(self.timer_path(bad_value_id)))
+        self.assertFalse(any(bad_value_id in arg for c in run.calls for arg in c))
+        # Only the well-formed entry got a timer, written and enabled.
+        self.assertTrue(os.path.exists(self.timer_path(good_rid)))
+        self.assertTrue(any("enable" in c and ("runbook-" + good_rid + ".timer") in c for c in run.calls))
+
+    def test_native_schedule_not_overridden_by_same_id_side_entry_when_readily_read_fails(self):
+        """Review Minor #2: the ok: False "preserve everything" branch must
+        keep the same setdefault protection as the ok: True path -- mirrors
+        test_native_schedule_is_not_overridden_by_same_id_side_entry but
+        with the Readily read failing."""
+        engine.save_config(self.environ, {"version": 1, "readily": {"enabled": True}})
+        rid = expected_id("Backup home")
+        engine.save_readily_schedules(self.environ, {rid: {"kind": "interval", "seconds": 999}})
+        run = ScheduleSyncFakeRun(listing=(1, "", "boom"))  # readily read fails -> ok: False
+
+        out = engine.sync_schedules(
+            self.lib([{"id": rid, "name": "n", "command": "c", "help": "",
+                      "schedule": {"kind": "interval", "seconds": 600}}]),
+            self.environ, run)
+
+        self.assertEqual(out, {})
+        with open(self.timer_path(rid), encoding="utf-8") as fh:
+            content = fh.read()
+        self.assertIn("OnUnitActiveSec=600", content)
+        self.assertNotIn("OnUnitActiveSec=999", content)
+        enable_calls = [c for c in run.calls if "enable" in c and ("runbook-" + rid + ".timer") in c]
+        self.assertEqual(len(enable_calls), 1)
 
 
 class SchedulesReportReadilySideStoreTest(unittest.TestCase):

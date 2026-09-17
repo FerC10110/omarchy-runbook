@@ -294,6 +294,13 @@ def readily_schedules_path(environ):
 
 
 def load_readily_schedules(environ):
+    """The side-store is a user-editable file: repair, never raise. A key
+    that isn't a valid 32-hex id is dropped (it would otherwise reach
+    _unit_base(sid) -> a path-traversal unit write); a value that doesn't
+    validate as a schedule is dropped too (it would otherwise reach
+    render_timer and raise an uncaught KeyError). validate_schedule returns
+    fresh dicts and, for a calendar schedule, only checks the regex (no
+    systemd-analyze call), so this stays a pure, run-less read."""
     path = readily_schedules_path(environ)
     try:
         with open(path, encoding="utf-8") as fh:
@@ -302,7 +309,18 @@ def load_readily_schedules(environ):
         return {}
     if not isinstance(raw, dict):
         return {}
-    return raw
+    cleaned = {}
+    for k, v in raw.items():
+        if not (isinstance(k, str) and ID_RE.match(k)):
+            continue
+        try:
+            sv = validate_schedule(v)
+        except RunbookError:
+            continue
+        if sv is None:  # a null/"no schedule" entry has no business persisting
+            continue
+        cleaned[k] = sv
+    return cleaned
 
 
 def save_readily_schedules(environ, data):
