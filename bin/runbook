@@ -161,15 +161,14 @@ def load_library(path):
     return _normalise(raw)
 
 
-def save_library(path, library):
+def _atomic_write(path, text):
+    """Write text to path via a temp file in the same dir, then rename in
+    place: readers never see a partial file, and cleanup runs on failure."""
     directory = os.path.dirname(path)
-    os.makedirs(directory, mode=0o700, exist_ok=True)
-    os.chmod(directory, 0o700)
-    fd, tmp_path = tempfile.mkstemp(prefix=".scripts-", suffix=".tmp", dir=directory)
+    fd, tmp_path = tempfile.mkstemp(prefix=".tmp-", suffix=".tmp", dir=directory)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(library, fh, ensure_ascii=False, indent=2)
-            fh.write("\n")
+            fh.write(text)
         os.chmod(tmp_path, 0o600)
         os.replace(tmp_path, path)
     except BaseException:
@@ -178,6 +177,13 @@ def save_library(path, library):
         except OSError:
             pass
         raise
+
+
+def save_library(path, library):
+    directory = os.path.dirname(path)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    os.chmod(directory, 0o700)
+    _atomic_write(path, json.dumps(library, ensure_ascii=False, indent=2) + "\n")
 
 
 def new_id():
@@ -439,6 +445,118 @@ def build_tmux(environ, run):
     socket = environ.get("RUNBOOK_TMUX_SOCKET") or "runbook"
     conf = environ.get("RUNBOOK_TMUX_CONF") or os.path.join(PLUGIN_DIR, "tmux.conf")
     return Tmux(socket, conf, run=run)
+
+
+# ------------------------------------------------------------------ schedule
+
+def unit_dir(environ):
+    base = environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(base, "systemd", "user")
+
+
+def runbook_bin_path():
+    return os.path.join(PLUGIN_DIR, "bin", "runbook")
+
+
+def _systemctl(run, environ, *args):
+    return run(["systemctl", "--user", *args], env=environ,
+               capture_output=True, text=True)
+
+
+def _bus_unavailable(result):
+    return result.returncode != 0 and "bus" in (result.stderr or "").lower()
+
+
+def normalize_calendar(expr, run):
+    result = run(["systemd-analyze", "calendar", expr], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RunbookError("Not a valid schedule")
+    for line in (result.stdout or "").splitlines():
+        line = line.strip()
+        if line.startswith("Normalized form:"):
+            return line.split(":", 1)[1].strip()
+    raise RunbookError("Not a valid schedule")
+
+
+def render_service(script_id, environ):
+    keep = ("RUNBOOK_TMUX_SOCKET", "RUNBOOK_TMUX_CONF", "XDG_CONFIG_HOME")
+    env_lines = "".join(
+        f"Environment={k}={environ[k]}\n" for k in keep if environ.get(k))
+    return (
+        "[Unit]\n"
+        f"Description=Runbook scheduled run of {script_id}\n\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        f"{env_lines}"
+        f"ExecStart={runbook_bin_path()} run {script_id}\n")
+
+
+def render_timer(schedule):
+    if schedule["kind"] == "interval":
+        s = schedule["seconds"]
+        spec = f"OnBootSec={s}\nOnUnitActiveSec={s}\n"
+    else:
+        spec = f"OnCalendar={schedule['oncalendar']}\nPersistent=true\n"
+    return ("[Unit]\n"
+            "Description=Runbook schedule timer\n\n"
+            "[Timer]\n"
+            f"{spec}\n"
+            "[Install]\n"
+            "WantedBy=timers.target\n")
+
+
+def sync_schedules(library, environ, run):
+    directory = unit_dir(environ)
+    os.makedirs(directory, exist_ok=True)
+    scheduled = {s["id"]: s["schedule"] for s in library["scripts"] if s.get("schedule")}
+
+    reload_result = _systemctl(run, environ, "daemon-reload")
+    if _bus_unavailable(reload_result):
+        return {"schedule_warning":
+                "systemd user instance not available; the schedule is saved but not active"}
+
+    # Escribir/activar los programados.
+    for sid, schedule in scheduled.items():
+        base = os.path.join(directory, "runbook-" + sid)
+        _atomic_write(base + ".service", render_service(sid, environ))
+        _atomic_write(base + ".timer", render_timer(schedule))
+    _systemctl(run, environ, "daemon-reload")
+    for sid in scheduled:
+        _systemctl(run, environ, "enable", "--now", "runbook-" + sid + ".timer")
+
+    # Quitar los que sobran.
+    for name in os.listdir(directory):
+        if not (name.startswith("runbook-") and name.endswith(".timer")):
+            continue
+        sid = name[len("runbook-"):-len(".timer")]
+        if sid in scheduled:
+            continue
+        _systemctl(run, environ, "disable", "--now", name)
+        for ext in (".timer", ".service"):
+            try:
+                os.unlink(os.path.join(directory, "runbook-" + sid + ext))
+            except OSError:
+                pass
+    return {}
+
+
+def schedules_report(environ, run):
+    result = _systemctl(run, environ, "list-timers", "--all", "--no-legend", "--no-pager")
+    if result.returncode != 0:
+        return {}
+    report = {}
+    for line in (result.stdout or "").splitlines():
+        if "runbook-" not in line:
+            continue
+        # Formato: NEXT LEFT LAST PASSED UNIT ACTIVATES
+        parts = line.split()
+        unit = next((p for p in parts if p.startswith("runbook-") and p.endswith(".timer")), None)
+        if not unit:
+            continue
+        sid = unit[len("runbook-"):-len(".timer")]
+        left = parts[parts.index(unit) - 1] if unit in parts else ""
+        report[sid] = {"next": left}
+    return report
 
 
 def read_stdin_json(stdin):
