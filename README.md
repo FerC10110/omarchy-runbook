@@ -37,6 +37,13 @@ omarchy plugin enable io.github.ferc10110.runbook --section left
 Requires tmux 3.2 or newer (Omarchy ships 3.7). Move the icon with
 `omarchy bar move io.github.ferc10110.runbook --section right`.
 
+To remove it:
+
+```bash
+omarchy plugin disable io.github.ferc10110.runbook
+omarchy plugin remove io.github.ferc10110.runbook
+```
+
 ## Adding and running commands
 
 Click the icon to open the panel and press `+` to add a command: a name, the
