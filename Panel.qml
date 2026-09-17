@@ -373,19 +373,50 @@ Panel {
     })
   }
 
+  readonly property var _weekdays: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
   readonly property var _dowNames: ({ Mon: "Mondays", Tue: "Tuesdays", Wed: "Wednesdays",
     Thu: "Thursdays", Fri: "Fridays", Sat: "Saturdays", Sun: "Sundays" })
+
+  // "Mon..Wed,Fri" -> ["Mon","Wed","Tue","Fri"] (any order); caller re-sorts.
+  // Returns null when a segment is not a known day or an inverted/bad range.
+  function _expandDaySet(str) {
+    var out = []
+    var parts = str.split(",")
+    for (var p = 0; p < parts.length; p++) {
+      var seg = parts[p]
+      var r = seg.split("..")
+      if (r.length === 2) {
+        var a = _weekdays.indexOf(r[0]), b = _weekdays.indexOf(r[1])
+        if (a < 0 || b < 0 || a > b) return null
+        for (var k = a; k <= b; k++) out.push(_weekdays[k])
+      } else {
+        if (_weekdays.indexOf(seg) < 0) return null
+        out.push(seg)
+      }
+    }
+    return out
+  }
+
   function describeSchedule(s) {
     if (!s) return ""
     if (s.kind === "interval") {
-      var sec = s.seconds
-      if (sec % 86400 === 0) return "Runs every " + (sec / 86400) + " day(s)"
-      if (sec % 3600 === 0) return "Runs every " + (sec / 3600) + " hour(s)"
-      return "Runs every " + Math.round(sec / 60) + " min"
+      var sec = s.seconds, n, unit
+      if (sec % 86400 === 0) { n = sec / 86400; unit = "day" }
+      else if (sec % 3600 === 0) { n = sec / 3600; unit = "hour" }
+      else { n = Math.round(sec / 60); unit = "minute" }
+      return "Runs every " + n + " " + unit + (n === 1 ? "" : "s")
     }
-    var wk = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \*-\*-\* (\d{2}:\d{2}):00$/.exec(s.oncalendar)
+    var wk = /^((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)(?:(?:,|\.\.)(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun))*) \*-\*-\* (\d{2}:\d{2}):00$/.exec(s.oncalendar)
     var dy = /^\*-\*-\* (\d{2}:\d{2}):00$/.exec(s.oncalendar)
-    if (wk) return "Runs on " + _dowNames[wk[1]] + " at " + wk[2]
+    if (wk) {
+      var days = _expandDaySet(wk[1])
+      if (days) {
+        days = _weekdays.filter(function(x) { return days.indexOf(x) >= 0 }).map(function(x) { return _dowNames[x] })
+        var list = days.length === 1 ? days[0]
+          : days.slice(0, -1).join(", ") + " and " + days[days.length - 1]
+        return "Runs on " + list + " at " + wk[2]
+      }
+    }
     if (dy) return "Runs daily at " + dy[1]
     return "Runs on schedule: " + s.oncalendar
   }

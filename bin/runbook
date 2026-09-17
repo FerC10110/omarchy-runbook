@@ -30,8 +30,11 @@ ID_RE = re.compile(r"^[0-9a-f]{32}$")
 NAME_MAX, COMMAND_MAX, HELP_MAX = 64, 4096, 4096
 VIEW_WIDTH, VIEW_HEIGHT = (600, 4000), (360, 3000)
 SCHEDULE_SECONDS = (60, 604800)  # 1 minuto a 7 días
-# Forma que produce la UI y acepta systemd: "[Dow ]*-*-* HH:MM:SS".
-_ONCALENDAR_RE = re.compile(r"^((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) )?\*-\*-\* \d{2}:\d{2}:\d{2}$")
+# Forma que produce la UI y acepta systemd: "[<dow-set> ]*-*-* HH:MM:SS", donde
+# <dow-set> es uno o más días unidos por "," o ".." (p.ej. "Mon,Wed,Fri" o "Mon..Wed,Fri").
+_WEEKDAY = r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)"
+_WEEKDAY_SET = _WEEKDAY + r"(?:(?:,|\.\.)" + _WEEKDAY + r")*"
+_ONCALENDAR_RE = re.compile(r"^(?:" + _WEEKDAY_SET + r" )?\*-\*-\* \d{2}:\d{2}:\d{2}$")
 
 
 def library_path(environ):

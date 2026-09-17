@@ -23,7 +23,8 @@ Item {
   // match the Daily/Weekly patterns this form knows how to render).
   property string scheduleMode: "off"
   property string everyUnit: "min"
-  property string weeklyDow: "Mon"
+  property var weeklyDows: ["Mon"]
+  readonly property var weekdays: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
   property string customOncalendar: ""
 
   readonly property bool hasFocus: nameField.activeFocus || commandField.focused || helpField.focused
@@ -31,6 +32,26 @@ Item {
 
   signal saveRequested(var fields)
   signal cancelRequested()
+
+  // "Mon..Wed,Fri" -> ["Mon","Wed","Tue","Fri"] (any order); caller re-sorts.
+  // Returns null when a segment is not a known day or an inverted/bad range.
+  function expandDaySet(str) {
+    var out = []
+    var parts = str.split(",")
+    for (var p = 0; p < parts.length; p++) {
+      var seg = parts[p]
+      var r = seg.split("..")
+      if (r.length === 2) {
+        var a = weekdays.indexOf(r[0]), b = weekdays.indexOf(r[1])
+        if (a < 0 || b < 0 || a > b) return null
+        for (var k = a; k <= b; k++) out.push(weekdays[k])
+      } else {
+        if (weekdays.indexOf(seg) < 0) return null
+        out.push(seg)
+      }
+    }
+    return out
+  }
 
   function load(script) {
     nameField.text = script ? script.name : ""
@@ -47,7 +68,7 @@ Item {
       everyUnit = "min"
       everyN.text = "30"
       dailyTime.text = "08:00"
-      weeklyDow = "Mon"
+      weeklyDows = ["Mon"]
       weeklyTime.text = "08:00"
       customOncalendar = ""
     } else if (sch.kind === "interval") {
@@ -56,9 +77,17 @@ Item {
       else if (sch.seconds % 3600 === 0) { everyUnit = "hour"; everyN.text = String(sch.seconds / 3600) }
       else { everyUnit = "min"; everyN.text = String(Math.round(sch.seconds / 60)) }
     } else {
-      var m = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \*-\*-\* (\d{2}:\d{2}):00$/.exec(sch.oncalendar)
+      var wk = /^((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)(?:(?:,|\.\.)(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun))*) \*-\*-\* (\d{2}:\d{2}):00$/.exec(sch.oncalendar)
       var d = /^\*-\*-\* (\d{2}:\d{2}):00$/.exec(sch.oncalendar)
-      if (m) { scheduleMode = "weekly"; weeklyDow = m[1]; weeklyTime.text = m[2] }
+      if (wk) {
+        var days = expandDaySet(wk[1])
+        if (days === null) { scheduleMode = "custom"; customOncalendar = sch.oncalendar }
+        else {
+          scheduleMode = "weekly"
+          weeklyDows = weekdays.filter(function(x) { return days.indexOf(x) >= 0 })
+          weeklyTime.text = wk[2]
+        }
+      }
       else if (d) { scheduleMode = "daily"; dailyTime.text = d[1] }
       else { scheduleMode = "custom"; customOncalendar = sch.oncalendar }
     }
@@ -76,7 +105,8 @@ Item {
     if (scheduleMode === "custom") return { kind: "calendar", oncalendar: customOncalendar }
     var t = (scheduleMode === "daily" ? dailyTime.text : weeklyTime.text) || "00:00"
     var hhmm = t.length === 5 ? t : "00:00"
-    var expr = (scheduleMode === "weekly" ? (weeklyDow + " ") : "") + "*-*-* " + hhmm + ":00"
+    var days = editor.weekdays.filter(function(d) { return editor.weeklyDows.indexOf(d) >= 0 })
+    var expr = (scheduleMode === "weekly" ? (days.join(",") + " ") : "") + "*-*-* " + hhmm + ":00"
     return { kind: "calendar", oncalendar: expr }
   }
 
@@ -95,6 +125,8 @@ Item {
   function scheduleError() {
     if (scheduleMode === "daily" && !dailyTime.acceptableInput)
       return "Enter a complete time as HH:MM"
+    if (scheduleMode === "weekly" && editor.weeklyDows.length === 0)
+      return "Select at least one day"
     if (scheduleMode === "weekly" && !weeklyTime.acceptableInput)
       return "Enter a complete time as HH:MM"
     if (scheduleMode === "every" && (everyN.text === "" || parseInt(everyN.text) < 1))
@@ -286,14 +318,20 @@ Item {
         Layout.fillWidth: true
         spacing: Style.space(4)
         Repeater {
-          model: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+          model: editor.weekdays
           delegate: Button {
             text: modelData
             bordered: true
-            active: editor.weeklyDow === modelData
+            active: editor.weeklyDows.indexOf(modelData) >= 0
             foreground: editor.foreground
             fontFamily: editor.fontFamily
-            onClicked: editor.weeklyDow = modelData
+            onClicked: {
+              var s = editor.weeklyDows.slice()
+              var i = s.indexOf(modelData)
+              if (i >= 0) s.splice(i, 1); else s.push(modelData)
+              // keep canonical order
+              editor.weeklyDows = editor.weekdays.filter(function(d) { return s.indexOf(d) >= 0 })
+            }
           }
         }
       }
