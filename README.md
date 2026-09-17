@@ -52,6 +52,20 @@ the last run's terminal.
   `loginctl enable-linger <user>`.
 - `systemctl --user list-timers | grep runbook` shows what is scheduled.
 
+## Integrate with Readily
+
+Runbook can optionally show commands from the [Readily](https://plugins.omarchy.org/plugin.html?id=io.github.ferc10110.readily)
+Obsidian plugin: items tagged `#runbook` in Readily's "commands" note appear in your Runbook list,
+marked with a subtle ◆. They run and schedule just like your own scripts.
+
+- **Edit in Obsidian.** A Readily command's name, text, and help are read-only in Runbook — change
+  them in Obsidian and Runbook picks up the update next time you open the panel.
+- **Install and configure.** Open the gear (⚙) in the Runbook panel header, toggle
+  **"Integrate with Readily"**, and make sure Readily is installed and has its Obsidian folder set.
+  If Readily is unavailable, the toggle stays inert with no errors.
+- **Auto-cleanup.** If you rename or delete a Readily command in Obsidian, its schedule in Runbook
+  is cleaned up automatically.
+
 ## Notes
 
 - Commands run in a non-interactive bash: no aliases and nothing from your
