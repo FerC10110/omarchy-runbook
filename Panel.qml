@@ -186,10 +186,15 @@ Panel {
     restoreSelection()
   }
 
-  // Shift+J / Shift+K and the ↑ ↓ buttons: move the selected item within its tab.
+  // Shift+J / Shift+K: move the selected item within its tab.
   function moveSelected(delta) {
-    if (selectedScript === null || editorOpen || engineWriting) return
-    var id = selectedId
+    if (selectedScript === null || editorOpen) return
+    moveItem(selectedId, delta)
+  }
+
+  // Also the ↑ ↓ of the Edit forms, which move the item being edited right away.
+  function moveItem(id, delta) {
+    if (id === "" || engineWriting) return
     engineWriting = true
     engineCall(["move", id], { delta: delta }, function(payload) {
       engineWriting = false
@@ -1069,25 +1074,6 @@ Panel {
               fontFamily: runbook.fontFamily
               onClicked: runbook.requestDelete()
             }
-            Item { Layout.fillWidth: true }
-            Button {
-              text: "↑"
-              bordered: true
-              enabled: runbook.selectedScript !== null && runbook.mode !== "editor"
-              foreground: runbook.foreground
-              fontFamily: runbook.fontFamily
-              tooltipText: "Move up (Shift+K)"
-              onClicked: runbook.moveSelected(-1)
-            }
-            Button {
-              text: "↓"
-              bordered: true
-              enabled: runbook.selectedScript !== null && runbook.mode !== "editor"
-              foreground: runbook.foreground
-              fontFamily: runbook.fontFamily
-              tooltipText: "Move down (Shift+J)"
-              onClicked: runbook.moveSelected(1)
-            }
           }
         }
 
@@ -1253,12 +1239,14 @@ Panel {
             anchors.fill: parent
             visible: runbook.mode === "editor" && runbook.editorKind === "script"
             tabs: runbook.tabs
+            canMove: runbook.editingId !== ""
             foreground: runbook.foreground
             accent: runbook.accent
             urgent: runbook.urgent
             dim: runbook.dim
             fontFamily: runbook.fontFamily
             monoFamily: runbook.monoFamily
+            onMoveRequested: function(delta) { runbook.moveItem(runbook.editingId, delta) }
             onSaveRequested: function(fields) { runbook.saveEditor(fields) }
             onCancelRequested: runbook.cancelEditor()
           }
@@ -1266,6 +1254,8 @@ Panel {
           SeparatorPane {
             id: separatorPane
             tabs: runbook.tabs
+            canMove: runbook.editingId !== ""
+            onMoveRequested: function(delta) { runbook.moveItem(runbook.editingId, delta) }
             anchors.fill: parent
             visible: runbook.mode === "editor" && runbook.editorKind === "separator"
             foreground: runbook.foreground

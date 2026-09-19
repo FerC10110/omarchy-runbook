@@ -18,9 +18,12 @@ Item {
   // The tabs to choose from, and the one this separator goes in.
   property var tabs: []
   property string tabId: "main"
+  // Editing a separator that is already in the list: the arrows move it there.
+  property bool canMove: false
 
   signal saveRequested(var fields)
   signal cancelRequested()
+  signal moveRequested(int delta)
 
   // defaultTab: where a new separator goes unless the form changes it.
   function load(separator, defaultTab) {
@@ -67,30 +70,57 @@ Item {
       Keys.onEscapePressed: function(event) { form.cancelRequested(); event.accepted = true }
     }
 
+    // Where it sits: its tab, applied on Save, and its place in the list,
+    // which the arrows change right away.
     Text {
       Layout.fillWidth: true
-      visible: tabPicker.visible
-      text: "Tab"
+      visible: placeRow.visible
+      text: tabPicker.visible ? "Tab and position" : "Position"
       textFormat: Text.PlainText
       color: form.dim
       font.family: form.fontFamily
       font.pixelSize: Style.font.caption
     }
 
-    Dropdown {
-      id: tabPicker
+    RowLayout {
+      id: placeRow
       Layout.fillWidth: true
-      visible: form.tabs.length > 1
-      showLabel: false
-      options: form.tabs.map(function(t) { return { value: t.id, label: t.name } })
-      value: form.tabId
-      foreground: form.foreground
-      accent: form.accent
-      fontFamily: form.fontFamily
-      onChanged: function(value) {
-        form.tabId = value
-        // A pick writes the kit's value, which breaks the binding: put it back.
-        tabPicker.value = Qt.binding(function() { return form.tabId })
+      visible: tabPicker.visible || form.canMove
+      spacing: Style.space(6)
+      Dropdown {
+        id: tabPicker
+        Layout.fillWidth: true
+        visible: form.tabs.length > 1
+        showLabel: false
+        options: form.tabs.map(function(t) { return { value: t.id, label: t.name } })
+        value: form.tabId
+        foreground: form.foreground
+        accent: form.accent
+        fontFamily: form.fontFamily
+        onChanged: function(value) {
+          form.tabId = value
+          // A pick writes the kit's value, which breaks the binding: put it back.
+          tabPicker.value = Qt.binding(function() { return form.tabId })
+        }
+      }
+      Item { Layout.fillWidth: true; visible: !tabPicker.visible }
+      Button {
+        text: "↑"
+        visible: form.canMove
+        bordered: true
+        foreground: form.foreground
+        fontFamily: form.fontFamily
+        tooltipText: "Move up in the list"
+        onClicked: form.moveRequested(-1)
+      }
+      Button {
+        text: "↓"
+        visible: form.canMove
+        bordered: true
+        foreground: form.foreground
+        fontFamily: form.fontFamily
+        tooltipText: "Move down in the list"
+        onClicked: form.moveRequested(1)
       }
     }
 

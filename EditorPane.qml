@@ -31,12 +31,15 @@ Item {
   // The tabs to choose from, and the one this script goes in.
   property var tabs: []
   property string tabId: "main"
+  // Editing a script that is already in the list: the arrows move it there.
+  property bool canMove: false
 
   readonly property bool hasFocus: nameField.activeFocus || commandField.focused || helpField.focused
     || everyN.activeFocus || dailyTime.activeFocus || weeklyTime.activeFocus
 
   signal saveRequested(var fields)
   signal cancelRequested()
+  signal moveRequested(int delta)
 
   // "Mon..Wed,Fri" -> ["Mon","Wed","Tue","Fri"] (any order); caller re-sorts.
   // Returns null when a segment is not a known day or an inverted/bad range.
@@ -215,21 +218,48 @@ Item {
       onAccepted: commandField.area.forceActiveFocus()
     }
 
-    FieldLabel { text: "Tab"; visible: tabPicker.visible }
-    Dropdown {
-      id: tabPicker
+    // Where it sits: its tab, applied on Save, and its place in the list,
+    // which the arrows change right away. A Readily command's too.
+    FieldLabel { text: tabPicker.visible ? "Tab and position" : "Position"; visible: placeRow.visible }
+    RowLayout {
+      id: placeRow
       Layout.fillWidth: true
-      visible: editor.tabs.length > 1   // a Readily command's tab changes here too
-      showLabel: false
-      options: editor.tabs.map(function(t) { return { value: t.id, label: t.name } })
-      value: editor.tabId
-      foreground: editor.foreground
-      accent: editor.accent
-      fontFamily: editor.fontFamily
-      onChanged: function(value) {
-        editor.tabId = value
-        // A pick writes the kit's value, which breaks the binding: put it back.
-        tabPicker.value = Qt.binding(function() { return editor.tabId })
+      visible: tabPicker.visible || editor.canMove
+      spacing: Style.space(6)
+      Dropdown {
+        id: tabPicker
+        Layout.fillWidth: true
+        visible: editor.tabs.length > 1
+        showLabel: false
+        options: editor.tabs.map(function(t) { return { value: t.id, label: t.name } })
+        value: editor.tabId
+        foreground: editor.foreground
+        accent: editor.accent
+        fontFamily: editor.fontFamily
+        onChanged: function(value) {
+          editor.tabId = value
+          // A pick writes the kit's value, which breaks the binding: put it back.
+          tabPicker.value = Qt.binding(function() { return editor.tabId })
+        }
+      }
+      Item { Layout.fillWidth: true; visible: !tabPicker.visible }
+      Button {
+        text: "↑"
+        visible: editor.canMove
+        bordered: true
+        foreground: editor.foreground
+        fontFamily: editor.fontFamily
+        tooltipText: "Move up in the list"
+        onClicked: editor.moveRequested(-1)
+      }
+      Button {
+        text: "↓"
+        visible: editor.canMove
+        bordered: true
+        foreground: editor.foreground
+        fontFamily: editor.fontFamily
+        tooltipText: "Move down in the list"
+        onClicked: editor.moveRequested(1)
       }
     }
 

@@ -84,8 +84,8 @@ commands there, so nothing is ever lost with a tab.
 **Separators** group related commands inside a tab. Press `―` in the header to
 add one right below the selected command: a plain line, or a line with a label
 centred on it (`──── docker ────`). Select it to edit its label, move it with
-`J`/`K` or the ↑ ↓ buttons, or delete it. New commands also go right below the
-selected one, so a group can be built in place.
+`J`/`K` or the ↑ ↓ in its **Edit** form, or delete it. New commands also go
+right below the selected one, so a group can be built in place.
 
 ## Omarchy's own commands
 
@@ -142,8 +142,8 @@ commands.
   in Runbook — change them in Obsidian and Runbook picks up the update next
   time you open the panel.
 - **Place them where you want.** Move a Readily command up or down with
-  `J`/`K` or the ↑ ↓ buttons, and send it to another tab from its **Edit**
-  form or with `H`/`L`, like your own commands. Runbook keeps only its place in
+  `J`/`K` or the ↑ ↓ in its **Edit** form, and send it to another tab from
+  that form or with `H`/`L`, like your own commands. Runbook keeps only its place in
   `scripts.json`; the command itself stays in Obsidian.
 - **Turn it on.** Open the gear (⚙) in the Runbook panel header, toggle
   **"Integrate with Readily"**, and make sure Readily is installed and has its
