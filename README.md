@@ -7,7 +7,7 @@ commands you keep in Obsidian through the
 [Readily](https://plugins.omarchy.org/plugin.html?id=io.github.ferc10110.readily)
 plugin.
 
-![The Runbook panel: your commands on the left, a running command's terminal on the right](preview.png)
+![The Runbook panel on its Omarchy tab: Omarchy's theme commands on the left, the output of omarchy theme list on the right](preview.png)
 
 ## What it does
 

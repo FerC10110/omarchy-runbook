@@ -873,8 +873,8 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      // While a text field owns the keyboard, letters must reach it.
-      blocked: (runbook.editorOpen || runbook.settingsOpen || runbook.inputFocused) && !confirm.opened
+      // While a text field or the "In tab" menu owns the keyboard, keys must reach it.
+      blocked: (runbook.editorOpen || runbook.settingsOpen || runbook.inputFocused || rowTab.popupOpen) && !confirm.opened
       onCloseRequested: {
         if (confirm.opened) runbook.closeConfirm(false)
         else if (runbook.editorOpen) runbook.cancelEditor()
@@ -994,7 +994,11 @@ Panel {
             accent: runbook.accent
             onTextChanged: runbook.searchOmarchy(text)
             // Enter or ↓ hands the keyboard back to the list, on the first match.
-            onAccepted: keyCatcher.forceActiveFocus()
+            // The key is consumed: a TextField lets Enter through to its parents
+            // after "accepted", and the list would take it as a second Enter
+            // (the arguments line), one Enter away from running the command.
+            Keys.onReturnPressed: function(event) { keyCatcher.forceActiveFocus(); event.accepted = true }
+            Keys.onEnterPressed: function(event) { keyCatcher.forceActiveFocus(); event.accepted = true }
             Keys.onDownPressed: function(event) { keyCatcher.forceActiveFocus(); event.accepted = true }
             Keys.onEscapePressed: function(event) {
               if (text !== "") text = ""
@@ -1066,6 +1070,8 @@ Panel {
               foreground: runbook.foreground
               accent: runbook.accent
               fontFamily: runbook.fontFamily
+              // Picked or dismissed, j/k go back to the list.
+              onPopupOpenChanged: if (!popupOpen) keyCatcher.forceActiveFocus()
               onChanged: function(value) {
                 // A pick writes the kit's value, which breaks the binding: put it back.
                 rowTab.value = Qt.binding(function() {

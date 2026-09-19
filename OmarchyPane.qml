@@ -166,7 +166,9 @@ Item {
           foreground: pane.foreground
           accent: pane.accent
           font.family: pane.monoFamily
-          onAccepted: pane.run()
+          // Consumed, so the Enter that runs it never reaches the panel's list.
+          Keys.onReturnPressed: function(event) { pane.run(); event.accepted = true }
+          Keys.onEnterPressed: function(event) { pane.run(); event.accepted = true }
           Keys.onEscapePressed: function(event) { argsField.focus = false; event.accepted = true }
         }
       }
