@@ -6,6 +6,8 @@ import qs.Ui
 // One script in the list. The small ▶ is the only thing that runs it; the rest
 // of the row only selects. The glyph on the right is the session state:
 // ● running, ✓ 0 finished well, ✗ N finished with an error, nothing otherwise.
+// The same row shows one of Omarchy's own commands in the Omarchy view, and
+// draws a separator ("──── docker ────") when the item is one.
 CursorSurface {
   id: row
   required property var modelData
@@ -20,6 +22,7 @@ CursorSurface {
   signal select()
 
   readonly property var script: modelData
+  readonly property bool isSeparator: script.kind === "separator"
   readonly property bool alive: session !== null && session.dead === false
   readonly property string statusText: session === null ? ""
     : (alive ? "●" : (session.exit === 0 ? "✓ 0" : "✗ " + (session.exit === null ? "?" : session.exit)))
@@ -39,11 +42,23 @@ CursorSurface {
     onClicked: row.select()
   }
 
+  // A separator row: selectable (to edit, move or delete it) but never run.
+  SeparatorLine {
+    anchors.fill: parent
+    anchors.leftMargin: Style.space(8)
+    anchors.rightMargin: Style.space(8)
+    visible: row.isSeparator
+    label: row.isSeparator ? row.script.label : ""
+    color: Qt.darker(row.foreground, 1.55)
+    fontFamily: row.fontFamily
+  }
+
   RowLayout {
     anchors.fill: parent
     anchors.leftMargin: Style.space(4)
     anchors.rightMargin: Style.space(8)
     spacing: Style.space(6)
+    visible: !row.isSeparator
 
     PanelActionButton {
       iconText: "▶"
@@ -57,12 +72,21 @@ CursorSurface {
 
     Text {
       Layout.fillWidth: true
-      text: row.script.name
+      text: row.isSeparator ? "" : row.script.name
       textFormat: Text.PlainText
       elide: Text.ElideRight
       color: row.foreground
       font.family: row.fontFamily
       font.pixelSize: Style.font.body
+    }
+
+    Text {
+      visible: row.script.sudo === true
+      text: "sudo"
+      textFormat: Text.PlainText
+      color: Qt.darker(row.foreground, 1.55)
+      font.family: row.fontFamily
+      font.pixelSize: Style.font.caption
     }
 
     Text {

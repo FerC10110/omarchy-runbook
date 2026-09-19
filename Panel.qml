@@ -19,14 +19,14 @@ Panel {
   property var hostWidget: null
 
   // ---- state owned by this panel
-  property var library: ({ version: 1, view: { width: 960, height: 540 }, scripts: [] })
+  property var library: ({ version: 1, view: { width: 960, height: 540 }, tabs: [{ id: "main", name: "Mine" }], scripts: [] })
   property var sessions: ({})           // id -> { dead: bool, exit: int|null }
   property var nextRuns: ({})           // id -> { next: "in 2h 5m" } for scheduled scripts with an active timer
-  property var config: ({ readily: { enabled: false } })
+  property var config: ({ readily: { enabled: false, tab: "main" }, omarchy: { enabled: true } })
   property string selectedId: ""
   property bool editorOpen: false
   property bool settingsOpen: false
-  property bool inputFocused: terminalPane.inputFocused
+  property bool inputFocused: terminalPane.inputFocused || omarchySearch.activeFocus || omarchyPane.argsFocused
   // The input field disables itself (or drops focus on Escape) without
   // handing focus to anything else, which would leave PanelKeyCatcher
   // (and its j/k/x/Esc/Tab handling) unreachable until the next click.
@@ -35,20 +35,75 @@ Panel {
   property int termRows: terminalPane.rows
   readonly property string mode: settingsOpen ? "settings"
     : editorOpen ? "editor"
-    : (selected !== null && sessionOf(selected.id) !== null ? "terminal" : "help")
+    : (selected !== null && sessionOf(selected.id) !== null ? "terminal"
+    : (view === "omarchy" ? "omarchy" : "help"))
   property string editingId: ""         // "" while adding, id while editing
   property bool editingReadily: false   // true while editing a read-only Readily row (schedule-only)
+  property string editorKind: "script"  // "script" | "separator": which form the editor shows
+  property string addAfter: ""          // a new item goes right below this one ("" = at the end)
+  property var confirmAction: null      // what the confirm dialog's destructive button does
   property string notice: ""
   property bool engineWriting: false    // true between a write call and its reload
 
   property int viewWidth: 960             // live panel size; saved through set-view
   property int viewHeight: 540
 
+  // ---- tabs: the user's (from scripts.json, "main" always among them), then
+  // Omarchy's own commands when that tab is on, read through the engine from
+  // `omarchy commands --json`. Each tab keeps its own selection.
+  property string view: "main"            // a tab id, or "omarchy"
+  property string lastUserTab: "main"     // where new items go while the Omarchy tab shows
+  property var viewSelection: ({})
+  property var omarchyCommands: []
+  property string omarchyWarning: ""
+  property bool omarchyLoading: false
+  property string omarchyQuery: ""
+  property var omarchyLastArgs: ({})      // id -> the arguments it last ran with
+
   readonly property var scripts: Array.isArray(library.scripts) ? library.scripts : []
+  readonly property var tabs: Array.isArray(library.tabs) && library.tabs.length > 0
+    ? library.tabs : [{ id: "main", name: "Mine" }]
+  readonly property bool omarchyEnabled: !(config && config.omarchy && config.omarchy.enabled === false)
+  readonly property var tabChips: omarchyEnabled ? tabs.concat([{ id: "omarchy", name: "Omarchy" }]) : tabs
+  readonly property var tabScripts: scripts.filter(function(s) { return (s.tab || "main") === runbook.view })
+  // Every word typed must appear in the command's route or its summary.
+  // Commands whose route holds the whole query come first, then those whose
+  // route holds every word, then summary-only matches ("set" is also in "reset").
+  readonly property var omarchyVisible: {
+    var terms = omarchyQuery.toLowerCase().split(/\s+/).filter(function(t) { return t !== "" })
+    if (terms.length === 0) return omarchyCommands
+    var query = terms.join(" ")
+    var ranked = []
+    for (var i = 0; i < omarchyCommands.length; i++) {
+      var c = omarchyCommands[i]
+      var name = c.name.toLowerCase()
+      var text = name + " " + c.summary.toLowerCase()
+      var inName = 0, inText = 0
+      for (var t = 0; t < terms.length; t++) {
+        if (name.indexOf(terms[t]) >= 0) inName++
+        if (text.indexOf(terms[t]) >= 0) inText++
+      }
+      if (inText < terms.length) continue
+      var rank = name.indexOf(query) >= 0 ? 0 : (inName === terms.length ? 1 : 2)
+      ranked.push({ command: c, rank: rank, order: i })
+    }
+    ranked.sort(function(a, b) { return a.rank - b.rank || a.order - b.order })
+    return ranked.map(function(r) { return r.command })
+  }
+  readonly property var currentList: view === "omarchy" ? omarchyVisible : tabScripts
   readonly property var selected: {
-    for (var i = 0; i < scripts.length; i++) if (scripts[i].id === selectedId) return scripts[i]
+    var pool = view === "omarchy" ? omarchyCommands : scripts
+    for (var i = 0; i < pool.length; i++) if (pool[i].id === selectedId) return pool[i]
     return null
   }
+  // The selection in a user tab: a script, a Readily row or a separator.
+  readonly property var selectedScript: view !== "omarchy" ? selected : null
+  readonly property bool selectedIsSeparator: selectedScript !== null && selectedScript.kind === "separator"
+  // Rows that live in scripts.json, the only ones that can be edited freely or deleted.
+  // Every row of a user tab can be moved, Readily ones included.
+  readonly property bool selectedIsNative: selectedScript !== null && selectedScript.source !== "readily"
+  // The help pane binds to this: never an Omarchy entry or a separator (no command/help fields).
+  readonly property var helpScript: selectedIsSeparator ? null : selectedScript
   readonly property int runningCount: {
     var n = 0
     for (var id in sessions) if (sessions[id] && sessions[id].dead === false) n++
@@ -79,11 +134,144 @@ Panel {
   }
 
   function moveSelection(delta) {
-    if (scripts.length === 0) return
+    var pool = currentList
+    if (pool.length === 0) return
     var at = -1
-    for (var i = 0; i < scripts.length; i++) if (scripts[i].id === selectedId) { at = i; break }
-    at = Math.max(0, Math.min(scripts.length - 1, at + delta))
-    selectedId = scripts[at].id
+    for (var i = 0; i < pool.length; i++) if (pool[i].id === selectedId) { at = i; break }
+    at = Math.max(0, Math.min(pool.length - 1, at + delta))
+    selectedId = pool[at].id
+    list.positionViewAtIndex(at, ListView.Contain)
+  }
+
+  function hasTab(id) {
+    for (var i = 0; i < tabChips.length; i++) if (tabChips[i].id === id) return true
+    return false
+  }
+
+  // The user tab new items go in: the one showing, or the last one shown
+  // while the Omarchy tab is up.
+  function userTab() {
+    if (view !== "omarchy") return view
+    return hasTab(lastUserTab) ? lastUserTab : tabs[0].id
+  }
+
+  // Switch tabs. The selection each tab had is remembered, and the Omarchy
+  // list is read the first time it is shown.
+  function setView(next) {
+    if (next === view || editorOpen || !hasTab(next)) return
+    var stash = Object.assign({}, viewSelection)
+    stash[view] = selectedId
+    viewSelection = stash
+    view = next
+    if (next !== "omarchy") lastUserTab = next
+    settingsOpen = false
+    restoreSelection()
+    if (next === "omarchy" && omarchyCommands.length === 0 && !omarchyLoading) loadOmarchy()
+  }
+
+  // Keep the tab's remembered selection if it is still in the list, else the first row.
+  function restoreSelection() {
+    var pool = currentList
+    var keep = viewSelection[view] || selectedId
+    for (var i = 0; i < pool.length; i++) if (pool[i].id === keep) { selectedId = keep; return }
+    selectedId = pool.length > 0 ? pool[0].id : ""
+  }
+
+  // After the tabs change (one deleted, the Omarchy tab turned off) the one
+  // showing may be gone: fall back to the first tab.
+  function ensureView() {
+    if (hasTab(view)) return
+    view = tabs[0].id
+    lastUserTab = view
+    restoreSelection()
+  }
+
+  // Shift+J / Shift+K and the ↑ ↓ buttons: move the selected item within its tab.
+  function moveSelected(delta) {
+    if (selectedScript === null || editorOpen || engineWriting) return
+    var id = selectedId
+    engineWriting = true
+    engineCall(["move", id], { delta: delta }, function(payload) {
+      engineWriting = false
+      applyLibrary(payload)
+      for (var i = 0; i < currentList.length; i++)
+        if (currentList[i].id === id) { list.positionViewAtIndex(i, ListView.Contain); break }
+    })
+  }
+
+  // h / l (or ← →): show the previous / next tab.
+  function stepTab(dx) {
+    if (editorOpen) return
+    for (var i = 0; i < tabChips.length; i++) if (tabChips[i].id === view) {
+      var next = i + dx
+      if (next >= 0 && next < tabChips.length) setView(tabChips[next].id)
+      return
+    }
+  }
+
+  // Shift+H / Shift+L: the user tab before / after the selected row's.
+  function neighbourTab(dx) {
+    if (selectedScript === null) return ""
+    var from = selectedScript.tab || "main"
+    for (var i = 0; i < tabs.length; i++) if (tabs[i].id === from) {
+      var next = i + dx
+      return next >= 0 && next < tabs.length ? tabs[next].id : ""
+    }
+    return ""
+  }
+
+  // The tab dropdown under the list and Shift+H / Shift+L: send the selected
+  // row -- a script, a separator or a Readily command -- to the end of another
+  // tab. The keys carry it along, so pressing again takes it further; the
+  // dropdown stays in this tab, on the row that took its place.
+  function moveSelectedToTab(tab, follow) {
+    if (selectedScript === null || tab === "" || editorOpen || engineWriting) return
+    if (tab === (selectedScript.tab || "main")) return
+    var id = selectedId
+    var at = 0
+    for (var i = 0; i < tabScripts.length; i++) if (tabScripts[i].id === id) { at = i; break }
+    engineWriting = true
+    engineCall(["set-tab", id], { tab: tab }, function(payload) {
+      engineWriting = false
+      if (!payload || payload.error !== undefined) {
+        showNotice(payload && payload.error ? payload.error : "The engine did not answer")
+        return
+      }
+      applyLibrary(payload)
+      if (tabScripts.length > 0) selectedId = tabScripts[Math.min(at, tabScripts.length - 1)].id
+      if (!follow) return
+      setView(tab)
+      selectedId = id
+      Qt.callLater(function() { list.positionViewAtIndex(tabScripts.length - 1, ListView.Contain) })
+    })
+  }
+
+  function loadOmarchy() {
+    omarchyLoading = true
+    engineCall(["omarchy"], undefined, function(payload) {
+      omarchyLoading = false
+      if (!payload || payload.error !== undefined) return
+      omarchyCommands = Array.isArray(payload.commands) ? payload.commands : []
+      omarchyWarning = payload.warning ? String(payload.warning) : ""
+      if (view === "omarchy" && selected === null && omarchyVisible.length > 0) selectedId = omarchyVisible[0].id
+    })
+  }
+
+  // Typing filters the list; the selection moves to the first match when
+  // the one it had is filtered out.
+  function searchOmarchy(text) {
+    omarchyQuery = text
+    var pool = omarchyVisible
+    for (var i = 0; i < pool.length; i++)
+      if (pool[i].id === selectedId) { list.positionViewAtIndex(i, ListView.Contain); return }
+    selectedId = pool.length > 0 ? pool[0].id : ""
+    list.positionViewAtBeginning()
+  }
+
+  function focusSearch() {
+    if (!omarchyEnabled) return
+    setView("omarchy")
+    if (view === "omarchy") omarchySearch.forceActiveFocus()
   }
 
   // sessions is replaced (not mutated) so every binding on it re-evaluates.
@@ -106,12 +294,50 @@ Panel {
     if (editorOpen) return
     selectScript(id)
     if (isAlive(id)) return
+    if (view === "omarchy") { omarchyPane.run(); return }
     engineCall(["run", id, "--cols", String(termCols), "--rows", String(termRows)], undefined, function(payload) {
       if (!payload || payload.error !== undefined) return
-      screenEpoch++
-      markSession(id, false, null)
-      refreshStatus()
+      sessionStarted(id)
     })
+  }
+
+  function sessionStarted(id) {
+    screenEpoch++
+    markSession(id, false, null)
+    refreshStatus()
+  }
+
+  // An Omarchy command runs as its route plus the arguments typed for it,
+  // which are remembered so ▶ on a finished one runs the same line again.
+  function runOmarchy(id, args) {
+    var last = Object.assign({}, omarchyLastArgs)
+    last[id] = args
+    omarchyLastArgs = last
+    engineCall(["omarchy-run", id, "--cols", String(termCols), "--rows", String(termRows)], { args: args }, function(payload) {
+      if (!payload || payload.error !== undefined) return
+      sessionStarted(id)
+    })
+  }
+
+  // Omarchy's floating terminal, the one its own menu uses; the panel steps
+  // out of the way so the terminal is in front.
+  function openInTerminal(commandLine) {
+    if (commandLine === "") return
+    Quickshell.execDetached(["omarchy-launch-floating-terminal-with-presentation", commandLine])
+    close()
+  }
+
+  // Copy an Omarchy command into the user's own list through the regular
+  // add form, so it can be renamed, edited and scheduled before saving.
+  function addFromOmarchy(args) {
+    var entry = selected
+    if (view !== "omarchy" || entry === null) return
+    var usage = entry.route + (entry.args !== "" ? " " + entry.args : "")
+    var help = entry.summary !== "" ? entry.summary + "\n\n" : ""
+    help += "Omarchy command. Usage: " + usage
+    for (var i = 0; i < entry.examples.length; i++) help += "\nExample: " + entry.examples[i]
+    var name = entry.name.charAt(0).toUpperCase() + entry.name.substring(1)
+    startAdd({ name: name.substring(0, 64), command: entry.route + (args !== "" ? " " + args : ""), help: help })
   }
 
   // ---- terminal screen: polled every 300 ms while the panel is open and the
@@ -193,6 +419,7 @@ Panel {
     if (screenFor !== selectedId) screen = emptyScreen()
     // The input line is per-selection: never carry typed text to another script.
     terminalPane.clearInput()
+    omarchyPane.setArgs(omarchyLastArgs[selectedId] || "")
   }
 
   function sendLine(id, text) {
@@ -220,23 +447,40 @@ Panel {
   }
 
   // ---- add / edit / delete
-  function startAdd() {
+  // A new item goes into the user tab showing (the last one shown when the
+  // Omarchy tab is up), right below the selected row there.
+  // prefill: optional { name, command, help } to start a script form from.
+  function startAdd(prefill, kind) {
+    setView(userTab())
+    editorKind = kind === "separator" ? "separator" : "script"
     editingId = ""
     editingReadily = false
-    editorPane.readOnly = false
-    editorPane.title = "New script"
-    editorPane.load(null)
+    addAfter = selectedScript !== null ? selectedId : ""
+    if (editorKind === "separator") {
+      separatorPane.title = "New separator"
+      separatorPane.load(null)
+    } else {
+      editorPane.readOnly = false
+      editorPane.title = "New script"
+      editorPane.load(prefill || null, view)
+    }
     editorOpen = true
     settingsOpen = false
   }
 
   function startEdit() {
-    if (selected === null) return
-    editingId = selected.id
-    editingReadily = (selected.source === "readily")
-    editorPane.readOnly = editingReadily
-    editorPane.title = editingReadily ? "Readily command (schedule only)" : "Edit script"
-    editorPane.load(selected)
+    if (selectedScript === null) return
+    editingId = selectedScript.id
+    editingReadily = (selectedScript.source === "readily")
+    editorKind = selectedIsSeparator ? "separator" : "script"
+    if (editorKind === "separator") {
+      separatorPane.title = "Edit separator"
+      separatorPane.load(selectedScript)
+    } else {
+      editorPane.readOnly = editingReadily
+      editorPane.title = editingReadily ? "Readily command (schedule and tab)" : "Edit script"
+      editorPane.load(selectedScript, view)
+    }
     editorOpen = true
     settingsOpen = false
   }
@@ -254,52 +498,110 @@ Panel {
     }
   }
 
+  function editorError(text) {
+    if (editorKind === "separator") separatorPane.errorText = text
+    else editorPane.errorText = text
+  }
+
   function saveEditor(fields) {
     if (editingReadily) {
+      var readilyId = editingId
+      var fromTab = selectedScript !== null && selectedScript.id === readilyId ? (selectedScript.tab || "main") : view
       engineWriting = true
-      engineCall(["schedule-set", editingId], fields.schedule, function(payload) {
-        engineWriting = false
+      engineCall(["schedule-set", readilyId], fields.schedule, function(payload) {
         if (!payload || payload.error !== undefined) {
-          editorPane.errorText = payload && payload.error ? payload.error : "The engine did not answer"
+          engineWriting = false
+          editorError(payload && payload.error ? payload.error : "The engine did not answer")
           return
         }
         if (payload.schedule_warning) showNotice(payload.schedule_warning)
-        editorOpen = false
-        keyCatcher.forceActiveFocus()
-        refreshList()        // re-merge the side-store schedule into the Readily row (so ⏰ shows)
         refreshSchedules()   // refresh nextRuns
+        if (fields.tab === undefined || fields.tab === fromTab) {
+          engineWriting = false
+          editorOpen = false
+          keyCatcher.forceActiveFocus()
+          refreshList()      // re-merge the side-store schedule into the Readily row (so ⏰ shows)
+          return
+        }
+        // The form moved it to another tab: the reply is the whole list, schedule included.
+        engineCall(["set-tab", readilyId], { tab: fields.tab }, function(moved) {
+          engineWriting = false
+          if (!moved || moved.error !== undefined) {
+            editorError(moved && moved.error ? moved.error : "The engine did not answer")
+            return
+          }
+          applyLibrary(moved)
+          editorOpen = false
+          setView(fields.tab)
+          selectedId = readilyId
+          keyCatcher.forceActiveFocus()
+        })
       })
       return
     }
 
-    var args = editingId === "" ? ["add"] : ["update", editingId]
     var adding = editingId === ""
+    var args = adding ? ["add"] : ["update", editingId]
+    var payloadIn = Object.assign({}, fields)
+    if (adding) {
+      if (addAfter !== "") payloadIn.after = addAfter
+      if (payloadIn.tab === undefined) payloadIn.tab = view
+    }
+    // The ids there before an add, to find the new one afterwards: Readily
+    // rows come after the native ones, so it is not necessarily the last row.
+    var before = {}
+    for (var b = 0; b < scripts.length; b++) before[scripts[b].id] = true
     engineWriting = true
-    engineCall(args, fields, function(payload) {
+    engineCall(args, payloadIn, function(payload) {
       engineWriting = false
       if (!payload || payload.error !== undefined) {
-        editorPane.errorText = payload && payload.error ? payload.error : "The engine did not answer"
+        editorError(payload && payload.error ? payload.error : "The engine did not answer")
         return
       }
       applyLibrary(payload)
-      if (adding && scripts.length > 0) selectedId = scripts[scripts.length - 1].id
+      var savedId = editingId
+      if (adding) {
+        savedId = ""
+        for (var i = 0; i < scripts.length; i++)
+          if (!before[scripts[i].id] && scripts[i].source !== "readily") { savedId = scripts[i].id; break }
+      }
       editorOpen = false
+      // Follow the item to its tab when the form moved it to another one.
+      for (var j = 0; j < scripts.length; j++)
+        if (scripts[j].id === savedId && (scripts[j].tab || "main") !== view) { setView(scripts[j].tab); break }
+      if (savedId !== "") selectedId = savedId
       keyCatcher.forceActiveFocus()
     })
   }
 
-  function requestDelete() {
-    if (selected === null) return
-    confirm.message = "Delete \"" + selected.name + "\"?"
-      + (sessionOf(selected.id) !== null ? " Its terminal will be closed." : "")
+  // The confirm dialog runs whatever action asked for it.
+  function askConfirm(message, confirmText, action) {
+    confirm.message = message
+    confirm.confirmText = confirmText
     confirm.selectedIndex = 0
+    confirmAction = action
     confirm.opened = true
     keyCatcher.forceActiveFocus()
   }
 
-  function performDelete() {
-    var id = selectedId
+  function closeConfirm(confirmed) {
+    var action = confirmAction
+    confirmAction = null
     confirm.opened = false
+    if (settingsOpen) settingsPane.forceActiveFocus()
+    if (confirmed && action) action()
+  }
+
+  function requestDelete() {
+    if (!selectedIsNative) return
+    var id = selectedId
+    var message = selectedIsSeparator
+      ? (selectedScript.label !== "" ? "Delete the \"" + selectedScript.label + "\" separator?" : "Delete this separator?")
+      : "Delete \"" + selectedScript.name + "\"?" + (sessionOf(id) !== null ? " Its terminal will be closed." : "")
+    askConfirm(message, "Delete", function() { performDelete(id) })
+  }
+
+  function performDelete(id) {
     if (id === "") return
     engineWriting = true
     engineCall(["remove", id], undefined, function(payload) {
@@ -309,6 +611,39 @@ Panel {
       if (screenFor === id) { screenFor = ""; screen = emptyScreen() }
       selectedId = ""
       applyLibrary(payload)
+    })
+  }
+
+  // ---- tabs and settings: every change goes through the engine and comes
+  // back as the whole library (or config).
+  function tabCall(args, stdinJson) {
+    engineWriting = true
+    engineCall(args, stdinJson, function(payload) {
+      engineWriting = false
+      applyLibrary(payload)
+    })
+  }
+
+  function requestRemoveTab(id) {
+    var name = "", count = 0
+    for (var i = 0; i < tabs.length; i++) if (tabs[i].id === id) name = tabs[i].name
+    for (var j = 0; j < scripts.length; j++)
+      if (scripts[j].tab === id && scripts[j].source !== "readily" && scripts[j].kind !== "separator") count++
+    var home = ""
+    for (var k = 0; k < tabs.length; k++) if (tabs[k].id === "main") home = tabs[k].name
+    askConfirm("Delete the \"" + name + "\" tab?"
+      + (count > 0 ? " Its " + (count === 1 ? "command moves" : count + " commands move") + " to \"" + home + "\"." : ""),
+      "Delete", function() { tabCall(["tab-remove", id]) })
+  }
+
+  function setConfig(patch) {
+    engineCall(["set-config"], patch, function(payload) {
+      if (payload && payload.error === undefined) {
+        config = payload
+        ensureView()
+        refreshList()
+      }
+      if (payload && payload.schedule_warning) showNotice(payload.schedule_warning)
     })
   }
 
@@ -402,8 +737,13 @@ Panel {
       viewWidth = payload.view.width
       viewHeight = payload.view.height
     }
-    if (selected === null && scripts.length > 0) selectedId = scripts[0].id
-    if (scripts.length === 0) selectedId = ""
+    // The tab showing may have been deleted; the selection must stay in the tab.
+    ensureView()
+    if (view !== "omarchy") {
+      var inTab = false
+      for (var i = 0; i < tabScripts.length; i++) if (tabScripts[i].id === selectedId) { inTab = true; break }
+      if (!inTab) selectedId = tabScripts.length > 0 ? tabScripts[0].id : ""
+    }
     refreshSchedules()
     if (payload.schedule_warning) showNotice(payload.schedule_warning)
   }
@@ -509,6 +849,8 @@ Panel {
       refreshList()
       refreshStatus()
       engineCall(["config"], undefined, function(p) { if (p && p.error === undefined) runbook.config = p })
+      // Re-read on every open while it is showing: an Omarchy update can change the list.
+      if (view === "omarchy") loadOmarchy()
     } else {
       confirm.opened = false
       editorOpen = false
@@ -534,7 +876,7 @@ Panel {
       // While a text field owns the keyboard, letters must reach it.
       blocked: (runbook.editorOpen || runbook.settingsOpen || runbook.inputFocused) && !confirm.opened
       onCloseRequested: {
-        if (confirm.opened) confirm.opened = false
+        if (confirm.opened) runbook.closeConfirm(false)
         else if (runbook.editorOpen) runbook.cancelEditor()
         else if (runbook.settingsOpen) runbook.settingsOpen = false
         else runbook.close()
@@ -546,16 +888,25 @@ Panel {
       onMoveRequested: function(dx, dy) {
         if (confirm.opened) { if (dx !== 0) confirm.selectedIndex = confirm.selectedIndex === 0 ? 1 : 0; return }
         if (dy !== 0) runbook.moveSelection(dy)
+        if (dx !== 0) runbook.stepTab(dx)
       }
       onActivateRequested: {
-        // Enter only answers the dialog; it never runs a script.
-        if (!confirm.opened) return
-        if (confirm.selectedIndex === 0) confirm.opened = false
-        else runbook.performDelete()
+        // Enter only answers the dialog, or moves to an Omarchy command's
+        // arguments line; it never runs a script.
+        if (!confirm.opened) { if (runbook.mode === "omarchy") omarchyPane.focusArgs(); return }
+        runbook.closeConfirm(confirm.selectedIndex !== 0)
       }
-      onDeleteRequested: { if (!confirm.opened && runbook.mode !== "editor" && !(runbook.selected && runbook.selected.source === "readily")) runbook.requestDelete() }
+      onDeleteRequested: { if (!confirm.opened && runbook.mode !== "editor") runbook.requestDelete() }
       onTextKey: function(text) {
-        if (text === "c" && runbook.mode === "terminal" && !confirm.opened) terminalPane.copyOutput()
+        if (confirm.opened) return
+        if (text === "c" && runbook.mode === "terminal") terminalPane.copyOutput()
+        if (text === "/" && runbook.mode !== "editor") runbook.focusSearch()
+        // Shift+J / Shift+K move the selected item down / up within its tab.
+        if (text === "J") runbook.moveSelected(1)
+        if (text === "K") runbook.moveSelected(-1)
+        // Shift+H / Shift+L send it to the previous / next tab.
+        if (text === "H") runbook.moveSelectedToTab(runbook.neighbourTab(-1), true)
+        if (text === "L") runbook.moveSelectedToTab(runbook.neighbourTab(1), true)
       }
 
       RowLayout {
@@ -574,7 +925,11 @@ Panel {
           PanelHero {
             Layout.fillWidth: true
             title: "Runbook"
-            meta: runbook.scripts.length === 1 ? "1 script" : runbook.scripts.length + " scripts"
+            meta: {
+              if (runbook.view === "omarchy") return runbook.omarchyCommands.length + " Omarchy commands"
+              var n = runbook.tabScripts.filter(function(s) { return s.kind !== "separator" }).length
+              return n === 1 ? "1 script" : n + " scripts"
+            }
             foreground: runbook.foreground
             fontFamily: runbook.fontFamily
 
@@ -590,6 +945,14 @@ Panel {
                   onClicked: runbook.startAdd()
                 }
                 PanelActionButton {
+                  iconText: "―"
+                  tooltipText: "Add a separator below the selection"
+                  enabled: runbook.mode !== "editor"
+                  foreground: runbook.foreground
+                  hoverColor: runbook.accent
+                  onClicked: runbook.startAdd(null, "separator")
+                }
+                PanelActionButton {
                   iconText: "⚙"
                   tooltipText: "Settings"
                   enabled: runbook.mode !== "editor"
@@ -598,6 +961,45 @@ Panel {
                   onClicked: runbook.toggleSettings()
                 }
               }
+            }
+          }
+
+          // The tabs, wrapping onto more lines when there are many.
+          Flow {
+            Layout.fillWidth: true
+            spacing: Style.space(6)
+            Repeater {
+              model: runbook.tabChips
+              delegate: Button {
+                required property var modelData
+                text: modelData.name
+                bordered: true
+                selected: runbook.view === modelData.id
+                enabled: runbook.mode !== "editor"
+                foreground: runbook.foreground
+                accent: runbook.accent
+                fontFamily: runbook.fontFamily
+                tooltipText: modelData.id === "omarchy" ? "Omarchy's own commands (/ to search)" : ""
+                onClicked: runbook.setView(modelData.id)
+              }
+            }
+          }
+
+          TextField {
+            id: omarchySearch
+            Layout.fillWidth: true
+            visible: runbook.view === "omarchy"
+            placeholderText: "Search (/)"
+            foreground: runbook.foreground
+            accent: runbook.accent
+            onTextChanged: runbook.searchOmarchy(text)
+            // Enter or ↓ hands the keyboard back to the list, on the first match.
+            onAccepted: keyCatcher.forceActiveFocus()
+            Keys.onDownPressed: function(event) { keyCatcher.forceActiveFocus(); event.accepted = true }
+            Keys.onEscapePressed: function(event) {
+              if (text !== "") text = ""
+              else keyCatcher.forceActiveFocus()
+              event.accepted = true
             }
           }
 
@@ -619,7 +1021,7 @@ Panel {
             clip: true
             spacing: Style.space(2)
             boundsBehavior: Flickable.StopAtBounds
-            model: runbook.scripts
+            model: runbook.currentList
             delegate: ScriptRow {
               selected: runbook.selectedId === modelData.id
               session: runbook.sessionOf(modelData.id)
@@ -632,13 +1034,56 @@ Panel {
             }
           }
 
+          Text {
+            Layout.fillWidth: true
+            visible: runbook.view === "omarchy" && runbook.omarchyQuery.trim() !== ""
+            text: runbook.omarchyVisible.length + " of " + runbook.omarchyCommands.length
+            textFormat: Text.PlainText
+            color: runbook.dim
+            font.family: runbook.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
+
+          // The selected row's tab: pick another one to send it there.
           RowLayout {
             Layout.fillWidth: true
+            visible: runbook.view !== "omarchy" && runbook.tabs.length > 1 && runbook.selectedScript !== null
+            spacing: Style.space(6)
+            Text {
+              text: "In tab"
+              textFormat: Text.PlainText
+              color: runbook.dim
+              font.family: runbook.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+            Dropdown {
+              id: rowTab
+              Layout.fillWidth: true
+              showLabel: false
+              enabled: runbook.mode !== "editor" && !runbook.engineWriting
+              options: runbook.tabs.map(function(t) { return { value: t.id, label: t.name } })
+              value: runbook.selectedScript !== null ? (runbook.selectedScript.tab || "main") : ""
+              foreground: runbook.foreground
+              accent: runbook.accent
+              fontFamily: runbook.fontFamily
+              onChanged: function(value) {
+                // A pick writes the kit's value, which breaks the binding: put it back.
+                rowTab.value = Qt.binding(function() {
+                  return runbook.selectedScript !== null ? (runbook.selectedScript.tab || "main") : ""
+                })
+                runbook.moveSelectedToTab(value, false)
+              }
+            }
+          }
+
+          RowLayout {
+            Layout.fillWidth: true
+            visible: runbook.view !== "omarchy"
             spacing: Style.space(6)
             Button {
               text: "Edit"
               bordered: true
-              enabled: runbook.selected !== null && runbook.mode !== "editor"
+              enabled: runbook.selectedScript !== null && runbook.mode !== "editor"
               foreground: runbook.foreground
               fontFamily: runbook.fontFamily
               onClicked: runbook.startEdit()
@@ -646,13 +1091,31 @@ Panel {
             Button {
               text: "Delete"
               bordered: true
-              visible: !(runbook.selected && runbook.selected.source === "readily")
-              enabled: runbook.selected !== null && runbook.mode !== "editor"
+              visible: !(runbook.selectedScript && runbook.selectedScript.source === "readily")
+              enabled: runbook.selectedIsNative && runbook.mode !== "editor"
               foreground: runbook.urgent
               fontFamily: runbook.fontFamily
               onClicked: runbook.requestDelete()
             }
             Item { Layout.fillWidth: true }
+            Button {
+              text: "↑"
+              bordered: true
+              enabled: runbook.selectedScript !== null && runbook.mode !== "editor"
+              foreground: runbook.foreground
+              fontFamily: runbook.fontFamily
+              tooltipText: "Move up (Shift+K)"
+              onClicked: runbook.moveSelected(-1)
+            }
+            Button {
+              text: "↓"
+              bordered: true
+              enabled: runbook.selectedScript !== null && runbook.mode !== "editor"
+              foreground: runbook.foreground
+              fontFamily: runbook.fontFamily
+              tooltipText: "Move down (Shift+J)"
+              onClicked: runbook.moveSelected(1)
+            }
           }
         }
 
@@ -686,8 +1149,8 @@ Panel {
 
               Text {
                 width: parent.width
-                visible: runbook.selected === null
-                text: runbook.scripts.length === 0 ? "Add a command with +" : "Select a script"
+                visible: runbook.selectedScript === null
+                text: runbook.tabScripts.length === 0 ? "Add a command with +" : "Select a script"
                 textFormat: Text.PlainText
                 color: runbook.dim
                 font.family: runbook.fontFamily
@@ -696,8 +1159,22 @@ Panel {
 
               Text {
                 width: parent.width
-                visible: runbook.selected !== null
-                text: runbook.selected ? runbook.selected.command : ""
+                visible: runbook.selectedIsSeparator
+                text: runbook.selectedIsSeparator
+                  ? (runbook.selectedScript.label !== "" ? "Separator \u201c" + runbook.selectedScript.label + "\u201d" : "Separator (no label)")
+                    + "\n\nEdit changes its label. Shift+J / Shift+K or the \u2191 \u2193 buttons move it; Delete removes it."
+                  : ""
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                color: runbook.dim
+                font.family: runbook.fontFamily
+                font.pixelSize: Style.font.body
+              }
+
+              Text {
+                width: parent.width
+                visible: runbook.helpScript !== null
+                text: runbook.helpScript ? runbook.helpScript.command : ""
                 textFormat: Text.PlainText
                 wrapMode: Text.WrapAnywhere
                 color: runbook.foreground
@@ -707,28 +1184,28 @@ Panel {
 
               PanelSeparator {
                 width: parent.width
-                visible: runbook.selected !== null
+                visible: runbook.helpScript !== null
                 foreground: runbook.foreground
               }
 
               Text {
                 width: parent.width
-                visible: runbook.selected !== null
-                text: runbook.selected && runbook.selected.help !== "" ? runbook.selected.help : "No help text yet. Use Edit to add one."
+                visible: runbook.helpScript !== null
+                text: runbook.helpScript && runbook.helpScript.help !== "" ? runbook.helpScript.help : "No help text yet. Use Edit to add one."
                 textFormat: Text.PlainText
                 wrapMode: Text.Wrap
-                color: runbook.selected && runbook.selected.help !== "" ? runbook.foreground : runbook.dim
+                color: runbook.helpScript && runbook.helpScript.help !== "" ? runbook.foreground : runbook.dim
                 font.family: runbook.fontFamily
                 font.pixelSize: Style.font.body
               }
 
               Text {
                 width: parent.width
-                visible: runbook.selected !== null && runbook.selected.schedule ? true : false
+                visible: runbook.helpScript !== null && runbook.helpScript.schedule ? true : false
                 text: {
-                  if (!runbook.selected || !runbook.selected.schedule) return ""
-                  var base = runbook.describeSchedule(runbook.selected.schedule)
-                  var nr = runbook.nextRuns[runbook.selected.id]
+                  if (!runbook.helpScript || !runbook.helpScript.schedule) return ""
+                  var base = runbook.describeSchedule(runbook.helpScript.schedule)
+                  var nr = runbook.nextRuns[runbook.helpScript.id]
                   return nr && nr.next ? base + " · next " + nr.next : base
                 }
                 textFormat: Text.PlainText
@@ -740,65 +1217,45 @@ Panel {
             }
           }
 
-          // Settings view: a labeled toggle for the Readily integration and a
-          // link to learn what Readily is. A FocusScope (not just a
-          // Flickable) so it can own Escape the same way each EditorPane
-          // field owns it: the kit Toggle only wires Return/Enter/Space, so
-          // an Escape pressed while it has focus bubbles up to here.
-          FocusScope {
+          SettingsPane {
             id: settingsPane
             anchors.fill: parent
             visible: runbook.mode === "settings"
             focus: visible
-            Keys.onEscapePressed: function(event) { runbook.settingsOpen = false; event.accepted = true }
+            config: runbook.config
+            tabs: runbook.tabs
+            foreground: runbook.foreground
+            accent: runbook.accent
+            urgent: runbook.urgent
+            dim: runbook.dim
+            fontFamily: runbook.fontFamily
+            onCloseRequested: runbook.settingsOpen = false
+            onConfigRequested: function(patch) { runbook.setConfig(patch) }
+            onAddTabRequested: function(name) { runbook.tabCall(["tab-add"], { name: name }) }
+            onRenameTabRequested: function(id, name) { runbook.tabCall(["tab-rename", id], { name: name }) }
+            onMoveTabRequested: function(id, delta) { runbook.tabCall(["tab-move", id], { delta: delta }) }
+            onRemoveTabRequested: function(id) { runbook.requestRemoveTab(id) }
+          }
 
-            Flickable {
-              id: settingsFlick
-              anchors.fill: parent
-              clip: true
-              contentWidth: width
-              contentHeight: settingsColumn.implicitHeight
-              boundsBehavior: Flickable.StopAtBounds
-              interactive: contentHeight > height
-
-              Column {
-                id: settingsColumn
-                width: settingsFlick.width
-                spacing: Style.space(10)
-
-                Toggle {
-                  width: parent.width
-                  label: "Integrate with Readily"
-                  description: "Show #runbook-tagged commands from your Readily notes"
-                  checked: !!(runbook.config && runbook.config.readily && runbook.config.readily.enabled)
-                  foreground: runbook.foreground
-                  accent: runbook.accent
-                  fontFamily: runbook.fontFamily
-                  onClicked: {
-                    var next = !checked
-                    runbook.engineCall(["set-config"], { readily: { enabled: next } }, function(p) {
-                      if (p && p.error === undefined) { runbook.config = p; runbook.refreshList() }
-                      if (p && p.schedule_warning) runbook.showNotice(p.schedule_warning)
-                    })
-                  }
-                }
-
-                Text {
-                  width: parent.width
-                  text: "What is Readily?"
-                  textFormat: Text.PlainText
-                  color: runbook.accent
-                  font.family: runbook.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-
-                  MouseArea {
-                    anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: Quickshell.execDetached(["xdg-open", "https://plugins.omarchy.org/plugin.html?id=io.github.ferc10110.readily"])
-                  }
-                }
-              }
-            }
+          OmarchyPane {
+            id: omarchyPane
+            anchors.fill: parent
+            visible: runbook.mode === "omarchy"
+            command: runbook.view === "omarchy" ? runbook.selected : null
+            emptyText: runbook.omarchyLoading && runbook.omarchyCommands.length === 0 ? "Loading Omarchy's commands…"
+              : runbook.omarchyWarning !== "" ? runbook.omarchyWarning
+              : runbook.omarchyCommands.length > 0 && runbook.omarchyVisible.length === 0
+                ? "No command matches \"" + runbook.omarchyQuery.trim() + "\""
+              : "Select a command"
+            foreground: runbook.foreground
+            accent: runbook.accent
+            urgent: runbook.urgent
+            dim: runbook.dim
+            fontFamily: runbook.fontFamily
+            monoFamily: runbook.monoFamily
+            onRunRequested: function(args) { runbook.runOmarchy(runbook.selectedId, args) }
+            onTerminalRequested: function(commandLine) { runbook.openInTerminal(commandLine) }
+            onAddRequested: function(args) { runbook.addFromOmarchy(args) }
           }
 
           TerminalPane {
@@ -822,13 +1279,27 @@ Panel {
           EditorPane {
             id: editorPane
             anchors.fill: parent
-            visible: runbook.mode === "editor"
+            visible: runbook.mode === "editor" && runbook.editorKind === "script"
+            tabs: runbook.tabs
             foreground: runbook.foreground
             accent: runbook.accent
             urgent: runbook.urgent
             dim: runbook.dim
             fontFamily: runbook.fontFamily
             monoFamily: runbook.monoFamily
+            onSaveRequested: function(fields) { runbook.saveEditor(fields) }
+            onCancelRequested: runbook.cancelEditor()
+          }
+
+          SeparatorPane {
+            id: separatorPane
+            anchors.fill: parent
+            visible: runbook.mode === "editor" && runbook.editorKind === "separator"
+            foreground: runbook.foreground
+            accent: runbook.accent
+            urgent: runbook.urgent
+            dim: runbook.dim
+            fontFamily: runbook.fontFamily
             onSaveRequested: function(fields) { runbook.saveEditor(fields) }
             onCancelRequested: runbook.cancelEditor()
           }
@@ -845,8 +1316,8 @@ Panel {
         foreground: runbook.foreground
         selectedText: runbook.accent
         fontFamily: runbook.fontFamily
-        onCanceled: confirm.opened = false
-        onConfirmed: runbook.performDelete()
+        onCanceled: runbook.closeConfirm(false)
+        onConfirmed: runbook.closeConfirm(true)
       }
 
       // Bottom-right grip: drag to resize. Sits in the card's own padding

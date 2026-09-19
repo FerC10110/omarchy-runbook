@@ -80,7 +80,8 @@ class LibraryCommandsTest(CliCase):
     def test_list_returns_empty_library(self):
         code, payload, fake = self.cli(["list"])
         self.assertEqual(code, 0)
-        self.assertEqual(payload, {"version": 1, "view": {"width": 960, "height": 540}, "scripts": []})
+        self.assertEqual(payload, {"version": 1, "view": {"width": 960, "height": 540},
+                          "tabs": [{"id": "main", "name": "Mine"}], "scripts": []})
         self.assertEqual(fake.calls, [])
 
     def test_add_reads_json_from_stdin_and_persists(self):

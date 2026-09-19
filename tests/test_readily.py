@@ -625,7 +625,8 @@ class ListDispatchReadilyMergeTest(ReadilyDispatchCase):
         run = CombinedFakeRun(listing=(0, LIST_PAYLOAD, ""))
         code, payload = self.cli(["list"], run)
         self.assertEqual(code, 0)
-        self.assertEqual(payload, {"version": 1, "view": {"width": 960, "height": 540}, "scripts": []})
+        self.assertEqual(payload, {"version": 1, "view": {"width": 960, "height": 540},
+                          "tabs": [{"id": "main", "name": "Mine"}], "scripts": []})
         self.assertEqual(run.calls, [])
 
 

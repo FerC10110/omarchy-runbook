@@ -39,14 +39,36 @@ _WEEKDAY_SET = _WEEKDAY + r"(?:(?:,|\.\.)" + _WEEKDAY + r")*"
 _ONCALENDAR_RE = re.compile(r"^(?:" + _WEEKDAY_SET + r" )?\*-\*-\* \d{2}:\d{2}:\d{2}\Z")
 
 
+# Tabs group the list. The "main" tab always exists: it can be renamed and
+# moved but not deleted, and it takes whatever loses its tab.
+MAIN_TAB = "main"
+DEFAULT_TAB_NAME = "Mine"
+TAB_ID_RE = re.compile(r"^(?:main|[0-9a-f]{32})\Z")
+TAB_NAME_MAX, LABEL_MAX = 32, 64
+
+
 def library_path(environ):
     base = environ.get("XDG_CONFIG_HOME") or os.path.join(
         environ.get("HOME") or os.path.expanduser("~"), ".config")
     return os.path.join(base, "runbook", "scripts.json")
 
 
+def _main_tab():
+    return {"id": MAIN_TAB, "name": DEFAULT_TAB_NAME}
+
+
 def empty_library():
-    return {"version": 1, "view": dict(DEFAULT_VIEW), "scripts": []}
+    return {"version": 1, "view": dict(DEFAULT_VIEW), "tabs": [_main_tab()], "scripts": []}
+
+
+def is_separator(item):
+    return item.get("kind") == "separator"
+
+
+def is_readily_slot(item):
+    """A Readily command's place in the list: only its id and tab live in
+    scripts.json; its name, command and help keep coming from Obsidian."""
+    return item.get("kind") == "readily"
 
 
 def _has_control_chars(text):
@@ -80,7 +102,57 @@ def validate_script(fields):
     result = {"name": name, "command": command, "help": help_text}
     if "schedule" in fields:
         result["schedule"] = validate_schedule(fields.get("schedule"))
+    tab = _tab_field(fields)
+    if tab is not None:
+        result["tab"] = tab
     return result
+
+
+def _tab_field(fields):
+    """The tab an item names, format-checked; None when it names none."""
+    tab = fields.get("tab")
+    if tab is None:
+        return None
+    if not isinstance(tab, str) or not TAB_ID_RE.match(tab):
+        raise RunbookError("Invalid tab id")
+    return tab
+
+
+def validate_separator(fields):
+    """A separator: a line in the list, with an optional label centred on it."""
+    if not isinstance(fields, dict):
+        raise RunbookError("Separator must be a JSON object")
+    label = _text(fields, "label", LABEL_MAX, 0, "Label")
+    if _has_control_chars(label):
+        raise RunbookError("Label must not contain control characters")
+    result = {"kind": "separator", "label": label}
+    tab = _tab_field(fields)
+    if tab is not None:
+        result["tab"] = tab
+    return result
+
+
+def validate_item(fields):
+    if isinstance(fields, dict) and fields.get("kind") == "separator":
+        return validate_separator(fields)
+    return validate_script(fields)
+
+
+def _validate_stored(fields):
+    """An item as scripts.json holds it: whatever validate_item accepts from
+    the panel, plus Readily slots, which only the engine writes."""
+    if fields.get("kind") == "readily":
+        return {"kind": "readily", "tab": _tab_field(fields) or MAIN_TAB}
+    return validate_item(fields)
+
+
+def validate_tab_name(fields):
+    if not isinstance(fields, dict):
+        raise RunbookError("Tab must be a JSON object")
+    name = _text(fields, "name", TAB_NAME_MAX, 1, "Tab name")
+    if _has_control_chars(name):
+        raise RunbookError("Tab name must not contain control characters")
+    return name
 
 
 def _bounded_int(value, bounds, label):
@@ -120,6 +192,31 @@ def validate_schedule(value):
     raise RunbookError("Unknown schedule kind")
 
 
+def _normalise_tabs(raw):
+    if raw is None:
+        return [_main_tab()]
+    if not isinstance(raw, list):
+        raise RunbookError("scripts.json: tabs must be a list")
+    tabs, seen = [], set()
+    for index, item in enumerate(raw, start=1):
+        if not isinstance(item, dict):
+            raise RunbookError(f"scripts.json: tab {index} is not an object")
+        tab_id = item.get("id")
+        if not isinstance(tab_id, str) or not TAB_ID_RE.match(tab_id):
+            raise RunbookError(f"scripts.json: tab {index} has an invalid id")
+        if tab_id in seen:
+            raise RunbookError(f"scripts.json: duplicate tab id {tab_id}")
+        seen.add(tab_id)
+        try:
+            name = validate_tab_name(item)
+        except RunbookError as exc:
+            raise RunbookError(f"scripts.json: tab {index}: {exc}") from exc
+        tabs.append({"id": tab_id, "name": name})
+    if MAIN_TAB not in seen:
+        tabs.insert(0, _main_tab())
+    return tabs
+
+
 def _normalise(raw):
     library = empty_library()
     if not isinstance(raw, dict):
@@ -128,6 +225,8 @@ def _normalise(raw):
         library["view"] = validate_view(raw.get("view"))
     except RunbookError:
         pass
+    library["tabs"] = _normalise_tabs(raw.get("tabs"))
+    tab_ids = {tab["id"] for tab in library["tabs"]}
     scripts = raw.get("scripts")
     if scripts is None:
         scripts = []
@@ -138,15 +237,20 @@ def _normalise(raw):
         if not isinstance(item, dict):
             raise RunbookError(f"scripts.json: script {index} is not an object")
         name = item.get("name")
-        label = name if isinstance(name, str) else str(name)
+        label = name if isinstance(name, str) else ("separator" if is_separator(item) else str(name))
         script_id = item.get("id")
         if not isinstance(script_id, str) or not ID_RE.match(script_id):
             raise RunbookError(f'scripts.json: script {index} ("{label}") has an invalid id')
         if script_id in seen_ids:
             raise RunbookError(f"scripts.json: duplicate id {script_id}")
         seen_ids.add(script_id)
+        # A tab that is malformed or gone (hand-edited file) is not worth
+        # refusing the whole file over: the item falls back to the main tab.
+        fields = dict(item)
+        if not isinstance(fields.get("tab"), str) or fields["tab"] not in tab_ids:
+            fields["tab"] = MAIN_TAB
         try:
-            script = validate_script(item)
+            script = _validate_stored(fields)
         except RunbookError as exc:
             raise RunbookError(f'scripts.json: script {index} ("{label}"): {exc}') from exc
         script["id"] = script_id
@@ -205,26 +309,151 @@ def find_script(library, script_id):
 
 def _check_unique(library, name, skip_id=None):
     for script in library["scripts"]:
+        if "kind" in script:   # separators and Readily slots have no name
+            continue
         if script["id"] != skip_id and script["name"].casefold() == name.casefold():
             raise RunbookError(f"A script named \"{name}\" already exists")
 
 
-def add_script(library, fields):
-    script = validate_script(fields)
-    _check_unique(library, script["name"])
-    script["id"] = new_id()
-    library["scripts"].append(script)
-    return script
+def find_tab(library, tab_id):
+    for tab in library["tabs"]:
+        if tab["id"] == tab_id:
+            return tab
+    return None
+
+
+def _check_tab(library, tab_id):
+    if find_tab(library, tab_id) is None:
+        raise RunbookError("No such tab")
+
+
+def add_script(library, fields, after=None):
+    """Add a script or a separator: right after the item `after` names when
+    it exists, at the end otherwise. It goes to the main tab unless it names one."""
+    item = validate_item(fields)
+    if not is_separator(item):
+        _check_unique(library, item["name"])
+    item.setdefault("tab", MAIN_TAB)
+    _check_tab(library, item["tab"])
+    item["id"] = new_id()
+    anchor = find_script(library, after) if after is not None else None
+    if anchor is None:
+        library["scripts"].append(item)
+    else:
+        library["scripts"].insert(library["scripts"].index(anchor) + 1, item)
+    return item
 
 
 def update_script(library, script_id, fields):
+    """Edit a script or a separator in place; its tab changes only when the
+    fields name one."""
     current = find_script(library, script_id)
     if current is None:
         raise RunbookError("No such script")
-    script = validate_script(fields)
-    _check_unique(library, script["name"], skip_id=script_id)
-    current.update(script)
+    if is_readily_slot(current):
+        raise RunbookError("A Readily command is edited in Obsidian")
+    if is_separator(current):
+        item = validate_separator(fields)
+    else:
+        item = validate_script(fields)
+        _check_unique(library, item["name"], skip_id=script_id)
+    if "tab" in item:
+        _check_tab(library, item["tab"])
+    current.update(item)
     return current
+
+
+def _move(items, item, delta):
+    at = items.index(item)
+    to = at + delta
+    if 0 <= to < len(items):
+        items[at], items[to] = items[to], items[at]
+
+
+def _delta(fields):
+    delta = fields.get("delta")
+    if isinstance(delta, bool) or delta not in (-1, 1):
+        raise RunbookError("Delta must be -1 or 1")
+    return delta
+
+
+def _findable(library, script_id, slots_shown):
+    """The item to move: a Readily slot counts only while the panel shows its
+    row, so a hidden slot is neither moved nor stepped over."""
+    current = find_script(library, script_id)
+    if current is None or (is_readily_slot(current) and not slots_shown):
+        raise RunbookError("No such script")
+    return current
+
+
+def move_script(library, script_id, delta, slots_shown=True):
+    """Swap an item with its neighbour in the same tab, stepping over the
+    items of other tabs -- and hidden Readily slots -- between them in the file."""
+    current = _findable(library, script_id, slots_shown)
+    items = library["scripts"]
+    same_tab = [item for item in items if item["tab"] == current["tab"]
+                and (slots_shown or not is_readily_slot(item))]
+    at = same_tab.index(current) + delta
+    if 0 <= at < len(same_tab):
+        a, b = items.index(current), items.index(same_tab[at])
+        items[a], items[b] = items[b], items[a]
+    return current
+
+
+def set_item_tab(library, script_id, tab_id, slots_shown=True):
+    """Move an item to another tab, at its end."""
+    current = _findable(library, script_id, slots_shown)
+    _check_tab(library, tab_id)
+    current["tab"] = tab_id
+    library["scripts"].remove(current)
+    library["scripts"].append(current)
+    return current
+
+
+def _check_tab_unique(library, name, skip_id=None):
+    for tab in library["tabs"]:
+        if tab["id"] != skip_id and tab["name"].casefold() == name.casefold():
+            raise RunbookError(f"A tab named \"{name}\" already exists")
+
+
+def add_tab(library, fields):
+    name = validate_tab_name(fields)
+    _check_tab_unique(library, name)
+    tab = {"id": new_id(), "name": name}
+    library["tabs"].append(tab)
+    return tab
+
+
+def rename_tab(library, tab_id, fields):
+    tab = find_tab(library, tab_id)
+    if tab is None:
+        raise RunbookError("No such tab")
+    name = validate_tab_name(fields)
+    _check_tab_unique(library, name, skip_id=tab_id)
+    tab["name"] = name
+    return tab
+
+
+def remove_tab(library, tab_id):
+    """Delete a tab; its items move to the main tab, never away."""
+    tab = find_tab(library, tab_id)
+    if tab is None:
+        raise RunbookError("No such tab")
+    if tab_id == MAIN_TAB:
+        raise RunbookError(f"The \"{tab['name']}\" tab cannot be deleted; rename it instead")
+    library["tabs"].remove(tab)
+    for item in library["scripts"]:
+        if item["tab"] == tab_id:
+            item["tab"] = MAIN_TAB
+    return tab
+
+
+def move_tab(library, tab_id, delta):
+    tab = find_tab(library, tab_id)
+    if tab is None:
+        raise RunbookError("No such tab")
+    _move(library["tabs"], tab, delta)
+    return tab
 
 
 def remove_script(library, script_id):
@@ -249,7 +478,8 @@ def config_file_path(environ):
 
 
 def default_config():
-    return {"version": 1, "readily": {"enabled": False}}
+    return {"version": 1, "readily": {"enabled": False, "tab": MAIN_TAB},
+            "omarchy": {"enabled": True}}
 
 
 def _repair_config(raw):
@@ -258,8 +488,15 @@ def _repair_config(raw):
     config = default_config()
     if isinstance(raw, dict):
         readily = raw.get("readily")
-        if isinstance(readily, dict) and isinstance(readily.get("enabled"), bool):
-            config["readily"]["enabled"] = readily["enabled"]
+        if isinstance(readily, dict):
+            if isinstance(readily.get("enabled"), bool):
+                config["readily"]["enabled"] = readily["enabled"]
+            tab = readily.get("tab")
+            if isinstance(tab, str) and TAB_ID_RE.match(tab):
+                config["readily"]["tab"] = tab
+        omarchy = raw.get("omarchy")
+        if isinstance(omarchy, dict) and isinstance(omarchy.get("enabled"), bool):
+            config["omarchy"]["enabled"] = omarchy["enabled"]
     return config
 
 
@@ -446,6 +683,21 @@ def start_session(tmux, script_id, command, cols, rows, environ):
         "--", LAUNCHER)
     if code != 0:
         raise _fail(err)
+
+
+def run_in_session(tmux, script_id, command, cols, rows, environ):
+    """Start the command in the session named by the id, unless one is
+    already running there; a finished session is replaced."""
+    try:
+        state = session_state(tmux, script_id)
+    except NoSession:
+        state = None
+    if state is not None and not state["dead"]:
+        return {"ok": True, "already": True}
+    if state is not None:
+        kill_session(tmux, script_id)
+    start_session(tmux, script_id, command, cols, rows, environ)
+    return {"ok": True, "already": False}
 
 
 def trim_trailing_blank(text):
@@ -669,6 +921,38 @@ def resolve_readily(script_id, environ, run):
     return None
 
 
+def _readily_tab(library, config):
+    """The tab for Readily rows the user has not moved."""
+    tab = config["readily"]["tab"]
+    return tab if find_tab(library, tab) is not None else MAIN_TAB
+
+
+def place_readily(library, environ, run):
+    """Give every Readily row a slot in scripts.json, so it can be moved like
+    a script and scripts can move past it. Rows that have a slot keep it; the
+    rest get one at the end, in the order and tab the panel already shows
+    them in. A slot whose command is gone is pruned -- only after a genuine
+    read: a transient failure cannot tell a gone command from a live one.
+
+    Returns whether the panel shows the slots' rows: False with the toggle off
+    or Readily unreadable, when every slot is hidden."""
+    config = load_config(environ)
+    if not config["readily"]["enabled"]:
+        return False
+    readily = read_readily_commands(environ, run)
+    if not readily["ok"]:
+        return False
+    live = {script["id"] for script in readily["scripts"]}
+    library["scripts"] = [item for item in library["scripts"]
+                          if not is_readily_slot(item) or item["id"] in live]
+    placed = {item["id"] for item in library["scripts"] if is_readily_slot(item)}
+    tab = _readily_tab(library, config)
+    for script in readily["scripts"]:
+        if script["id"] not in placed:
+            library["scripts"].append({"kind": "readily", "tab": tab, "id": script["id"]})
+    return True
+
+
 def merge_readily(library, environ, run):
     """Append the config-gated Readily commands into `library` in place and
     return it, mirroring the merge the "list" command performs.
@@ -677,22 +961,137 @@ def merge_readily(library, environ, run):
     always the full native+Readily view: the panel treats each reply as the
     whole list, so a native-only reply (from set-view/add/update/remove) would
     drop the Readily rows until the next `list`. Native scripts are already in
-    `library["scripts"]`; this only adds the Readily rows. No-op when the
-    toggle is off."""
-    if not load_config(environ)["readily"]["enabled"]:
+    `library["scripts"]`; this only adds the Readily rows.
+
+    A row the user has moved takes the place and tab of its slot; the rest go
+    at the end, in the tab the config names (the main tab when that one is
+    gone). Slots themselves never reach the panel: with the toggle off, with
+    Readily unreadable, or for a command that is gone, the slot is left out
+    of the reply (and kept in the file, so a later read puts it back)."""
+    config = load_config(environ)
+    if not config["readily"]["enabled"]:
+        library["scripts"] = [item for item in library["scripts"] if not is_readily_slot(item)]
         return library
     readily = read_readily_commands(environ, run)
     schedules = load_readily_schedules(environ)
+    rows = {script["id"]: script for script in readily["scripts"]}
+    merged, placed = [], set()
+    for item in library["scripts"]:
+        if not is_readily_slot(item):
+            merged.append(item)
+        elif item["id"] in rows:
+            rows[item["id"]]["tab"] = item["tab"]
+            merged.append(rows[item["id"]])
+            placed.add(item["id"])
+    tab = _readily_tab(library, config)
+    for script in readily["scripts"]:
+        if script["id"] not in placed:
+            script["tab"] = tab
+            merged.append(script)
     for script in readily["scripts"]:
         sched = schedules.get(script["id"])
         if sched is not None:
             script["schedule"] = sched
-        library["scripts"].append(script)
+    library["scripts"] = merged
     if readily["warning"] is not None:
         library["readily_warning"] = readily["warning"]
     if readily["skipped"] > 0:
         library["readily_skipped"] = readily["skipped"]
     return library
+
+
+# ------------------------------------------------------------------ omarchy
+
+# A route becomes the start of a bash command line, so only plain words pass.
+OMARCHY_ROUTE_RE = re.compile(r"^omarchy(?: [a-z0-9][a-z0-9._-]*)*\Z")
+OMARCHY_TIMEOUT = 10.0
+ARGS_MAX = 1024
+
+
+def _omarchy_id(route):
+    """Stable id for an Omarchy command, keyed on its route. Same 32-hex shape
+    as a script id, so it names a tmux session like any script does."""
+    return hashlib.sha256(b"omarchy\0" + route.encode("utf-8")).hexdigest()[:32]
+
+
+def _omarchy_empty(warning):
+    return {"commands": [], "warning": warning, "ok": False}
+
+
+def _omarchy_entry(item):
+    """One item of `omarchy commands --json`, reduced to what the panel shows,
+    or None when it is hidden or its route is not a plain omarchy route."""
+    if not isinstance(item, dict) or item.get("hidden") is True:
+        return None
+    route = item.get("route")
+    if not isinstance(route, str) or not OMARCHY_ROUTE_RE.match(route):
+        return None
+    summary, args, examples = item.get("summary"), item.get("args"), item.get("examples")
+    return {
+        "id": _omarchy_id(route),
+        "name": route[len("omarchy "):] or route,
+        "route": route,
+        "summary": summary.strip() if isinstance(summary, str) else "",
+        "args": args.strip() if isinstance(args, str) else "",
+        "examples": [e for e in examples if isinstance(e, str) and e.strip()]
+        if isinstance(examples, list) else [],
+        "sudo": item.get("requires_sudo") is True,
+        "source": "omarchy",
+    }
+
+
+def read_omarchy_commands(environ, run):
+    """Omarchy's own commands, as `omarchy commands --json` lists them (argv
+    only, no shell), sorted by route. Hidden ones stay out, as they do in
+    `omarchy commands`. Never raises: a missing binary, an Omarchy without
+    --json, a timeout or an unexpected answer degrade to an empty list with a
+    warning, and "ok" tells that apart from a genuine answer."""
+    try:
+        result = run(["omarchy", "commands", "--json"], capture_output=True, text=True,
+                     timeout=OMARCHY_TIMEOUT)
+        if result.returncode != 0:
+            return _omarchy_empty("This Omarchy cannot list its commands (omarchy commands --json failed)")
+        try:
+            data = json.loads(result.stdout or "")
+        except ValueError:
+            return _omarchy_empty("Omarchy returned an unexpected command list")
+        items = data.get("commands") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            return _omarchy_empty("Omarchy returned an unexpected command list")
+        commands, seen = [], set()
+        for item in items:
+            entry = _omarchy_entry(item)
+            if entry is None or entry["id"] in seen:
+                continue
+            seen.add(entry["id"])
+            commands.append(entry)
+        commands.sort(key=lambda entry: entry["route"])
+        return {"commands": commands, "warning": None, "ok": True}
+    except FileNotFoundError:
+        return _omarchy_empty("The omarchy command was not found")
+    except subprocess.TimeoutExpired:
+        return _omarchy_empty(f"omarchy did not answer within {OMARCHY_TIMEOUT:g} seconds")
+    except Exception as exc:
+        return _omarchy_empty(f"Omarchy error: {exc}")
+
+
+def resolve_omarchy(script_id, environ, run):
+    for entry in read_omarchy_commands(environ, run)["commands"]:
+        if entry["id"] == script_id:
+            return entry
+    return None
+
+
+def validate_omarchy_args(fields):
+    """The arguments typed after an Omarchy route: shell text on one line."""
+    value = _text(fields, "args", ARGS_MAX, 0, "Arguments")
+    if _has_control_chars(value):
+        raise RunbookError("Arguments must be on one line")
+    return value
+
+
+def omarchy_command_line(entry, args):
+    return entry["route"] + (" " + args if args else "")
 
 
 # ------------------------------------------------------------------ schedule
@@ -950,6 +1349,14 @@ def _script_id(args):
     return check_id(args[0])
 
 
+def _tab_id(args):
+    if not args:
+        raise RunbookError("Missing tab id")
+    if not TAB_ID_RE.match(args[0]):
+        raise RunbookError("Invalid tab id")
+    return args[0]
+
+
 def dispatch(argv, environ, run, stdin, kill, sleep, clock):
     if not argv:
         raise RunbookError(USAGE)
@@ -961,7 +1368,10 @@ def dispatch(argv, environ, run, stdin, kill, sleep, clock):
     if command == "add":
         fields = read_stdin_json(stdin)
         library = load_library(path)
-        script = add_script(library, fields)
+        after = fields.get("after") if isinstance(fields.get("after"), str) else None
+        if after is not None and find_script(library, after) is None:
+            place_readily(library, environ, run)   # "after" may name a Readily row
+        script = add_script(library, fields, after)
         _finalize_schedule(script, run)
         save_library(path, library)
         # sync runs on the native library; then merge the Readily rows into
@@ -995,14 +1405,45 @@ def dispatch(argv, environ, run, stdin, kill, sleep, clock):
         set_view(library, view)
         save_library(path, library)
         return merge_readily(library, environ, run)
+    if command in ("move", "set-tab"):
+        script_id = _script_id(args)
+        fields = read_stdin_json(stdin)
+        library = load_library(path)
+        # Readily rows get their slots first, so they move like scripts and
+        # scripts move past them.
+        shown = place_readily(library, environ, run)
+        if command == "move":
+            move_script(library, script_id, _delta(fields), shown)
+        else:
+            tab = fields.get("tab")
+            if not isinstance(tab, str) or not TAB_ID_RE.match(tab):
+                raise RunbookError("Invalid tab id")
+            set_item_tab(library, script_id, tab, shown)
+        save_library(path, library)
+        return merge_readily(library, environ, run)
+    if command in ("tab-add", "tab-rename", "tab-remove", "tab-move"):
+        tab_id = _tab_id(args) if command != "tab-add" else None
+        fields = read_stdin_json(stdin) if command != "tab-remove" else None
+        library = load_library(path)
+        if command == "tab-add":
+            add_tab(library, fields)
+        elif command == "tab-rename":
+            rename_tab(library, tab_id, fields)
+        elif command == "tab-remove":
+            remove_tab(library, tab_id)
+        else:
+            move_tab(library, tab_id, _delta(fields))
+        save_library(path, library)
+        return merge_readily(library, environ, run)
     if command == "config":
         return load_config(environ)
     if command == "set-config":
         data = read_stdin_json(stdin)
         config = load_config(environ)
-        incoming = data.get("readily")
-        if isinstance(incoming, dict):
-            config["readily"].update(incoming)
+        for key in ("readily", "omarchy"):
+            incoming = data.get(key)
+            if isinstance(incoming, dict):
+                config[key].update(incoming)
         config = _repair_config(config)
         save_config(environ, config)
         return {**config, **sync_schedules(load_library(path), environ, run)}
@@ -1024,32 +1465,36 @@ def dispatch(argv, environ, run, stdin, kill, sleep, clock):
         return {"ok": True, **sync_schedules(load_library(path), environ, run)}
     if command == "schedules":
         return schedules_report(load_library(path), environ, run)
+    if command == "omarchy":
+        return read_omarchy_commands(environ, run)
 
     tmux = build_tmux(environ, run)
     if command == "status":
         return {"sessions": list_sessions(tmux)}
 
-    if command not in ("run", "screen", "send", "stop", "close", "resize"):
+    if command not in ("run", "omarchy-run", "screen", "send", "stop", "close", "resize"):
         raise RunbookError("Unknown command: " + command)
 
     script_id = _script_id(args)
     if command == "run":
         cols, rows = parse_size(args[1:])
         script = find_script(load_library(path), script_id)
+        if script is not None and is_separator(script):
+            raise RunbookError("A separator cannot run")
+        if script is not None and is_readily_slot(script):
+            script = None   # only its place is here; the command comes from Readily
         if script is None and load_config(environ)["readily"]["enabled"]:
             script = resolve_readily(script_id, environ, run)
         if script is None:
             raise RunbookError("No such script")
-        try:
-            state = session_state(tmux, script_id)
-        except NoSession:
-            state = None
-        if state is not None and not state["dead"]:
-            return {"ok": True, "already": True}
-        if state is not None:
-            kill_session(tmux, script_id)
-        start_session(tmux, script_id, script["command"], cols, rows, environ)
-        return {"ok": True, "already": False}
+        return run_in_session(tmux, script_id, script["command"], cols, rows, environ)
+    if command == "omarchy-run":
+        cols, rows = parse_size(args[1:])
+        extra = validate_omarchy_args(read_stdin_json(stdin))
+        entry = resolve_omarchy(script_id, environ, run)
+        if entry is None:
+            raise RunbookError("No such Omarchy command")
+        return run_in_session(tmux, script_id, omarchy_command_line(entry, extra), cols, rows, environ)
     if command == "screen":
         state = session_state(tmux, script_id)
         text = capture(tmux, script_id)

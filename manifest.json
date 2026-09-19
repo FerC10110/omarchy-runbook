@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "io.github.ferc10110.runbook",
   "name": "Runbook",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "Fernando Cancro",
   "license": "MIT",
-  "description": "Keep the commands you run now and then, each with a short help text, and run them from the bar in an embedded terminal. Schedule them with systemd user timers, and optionally pull in #runbook-tagged commands from the Readily Obsidian plugin.",
+  "description": "Keep the commands you run now and then, each with a short help text, and run them from the bar in an embedded terminal. Group them in tabs and with separators, browse and run Omarchy's own commands, schedule them with systemd user timers, and optionally pull in #runbook-tagged commands from the Readily Obsidian plugin.",
   "kinds": [
     "bar-widget"
   ],

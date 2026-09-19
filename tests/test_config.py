@@ -10,7 +10,8 @@ from fakes import FakeRun
 
 engine = load()
 
-DEFAULT = {"version": 1, "readily": {"enabled": False}}
+DEFAULT = {"version": 1, "readily": {"enabled": False, "tab": "main"}, "omarchy": {"enabled": True}}
+READILY_ON = {"version": 1, "readily": {"enabled": True, "tab": "main"}, "omarchy": {"enabled": True}}
 
 
 class ConfigFilePathTest(unittest.TestCase):
@@ -43,7 +44,7 @@ class LoadSaveConfigTest(unittest.TestCase):
 
     def test_save_then_load_round_trips(self):
         engine.save_config(self.environ, {"version": 1, "readily": {"enabled": True}})
-        self.assertEqual(engine.load_config(self.environ), {"version": 1, "readily": {"enabled": True}})
+        self.assertEqual(engine.load_config(self.environ), READILY_ON)
 
     def test_save_creates_private_dir_and_file(self):
         engine.save_config(self.environ, engine.default_config())
@@ -103,7 +104,7 @@ class ConfigDispatchTest(unittest.TestCase):
 
     def test_set_config_persists_and_returns_merged_config(self):
         code, payload, fake = self.cli(["set-config"], stdin_text='{"readily":{"enabled":true}}')
-        self.assertEqual((code, payload), (0, {"version": 1, "readily": {"enabled": True}}))
+        self.assertEqual((code, payload), (0, READILY_ON))
         # Fix I1: set-config must reconcile timers via sync_schedules, not
         # just persist. The default CliCase fake answers every call with
         # success, so sync_schedules returns {} (no schedule_warning) and
@@ -115,11 +116,11 @@ class ConfigDispatchTest(unittest.TestCase):
     def test_config_reflects_a_previous_set_config(self):
         self.cli(["set-config"], stdin_text='{"readily":{"enabled":true}}')
         code, payload, _ = self.cli(["config"])
-        self.assertEqual((code, payload), (0, {"version": 1, "readily": {"enabled": True}}))
+        self.assertEqual((code, payload), (0, READILY_ON))
 
     def test_set_config_ignores_unknown_top_level_keys(self):
         code, payload, _ = self.cli(["set-config"], stdin_text='{"bogus": 1, "readily": {"enabled": true}}')
-        self.assertEqual((code, payload), (0, {"version": 1, "readily": {"enabled": True}}))
+        self.assertEqual((code, payload), (0, READILY_ON))
 
     def test_set_config_ignores_non_dict_readily(self):
         code, payload, _ = self.cli(["set-config"], stdin_text='{"readily": "nope"}')

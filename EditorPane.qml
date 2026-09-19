@@ -28,6 +28,10 @@ Item {
   readonly property var weekdays: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
   property string customOncalendar: ""
 
+  // The tabs to choose from, and the one this script goes in.
+  property var tabs: []
+  property string tabId: "main"
+
   readonly property bool hasFocus: nameField.activeFocus || commandField.focused || helpField.focused
     || everyN.activeFocus || dailyTime.activeFocus || weeklyTime.activeFocus
 
@@ -54,11 +58,13 @@ Item {
     return out
   }
 
-  function load(script) {
+  // defaultTab: where a new script goes unless the form changes it.
+  function load(script, defaultTab) {
     nameField.text = script ? script.name : ""
     commandField.text = script ? script.command : ""
     helpField.text = script ? script.help : ""
     errorText = ""
+    tabId = script && script.tab ? script.tab : (defaultTab || "main")
 
     var sch = script ? script.schedule : null
     if (!sch) {
@@ -113,7 +119,7 @@ Item {
 
   function fields() {
     return { name: nameField.text, command: commandField.text, help: helpField.text,
-             schedule: scheduleObject() }
+             schedule: scheduleObject(), tab: tabId }
   }
 
   // "" when the schedule (if any) is complete enough to save; a message
@@ -207,6 +213,24 @@ Item {
       opacity: editor.readOnly ? 0.6 : 1.0
       Keys.onEscapePressed: function(event) { editor.cancelRequested(); event.accepted = true }
       onAccepted: commandField.area.forceActiveFocus()
+    }
+
+    FieldLabel { text: "Tab"; visible: tabPicker.visible }
+    Dropdown {
+      id: tabPicker
+      Layout.fillWidth: true
+      visible: editor.tabs.length > 1   // a Readily command's tab changes here too
+      showLabel: false
+      options: editor.tabs.map(function(t) { return { value: t.id, label: t.name } })
+      value: editor.tabId
+      foreground: editor.foreground
+      accent: editor.accent
+      fontFamily: editor.fontFamily
+      onChanged: function(value) {
+        editor.tabId = value
+        // A pick writes the kit's value, which breaks the binding: put it back.
+        tabPicker.value = Qt.binding(function() { return editor.tabId })
+      }
     }
 
     FieldLabel { text: "Command (runs in non-interactive bash, exactly as written)" }

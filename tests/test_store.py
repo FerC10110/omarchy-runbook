@@ -32,7 +32,8 @@ class LoadSaveTest(unittest.TestCase):
 
     def test_missing_file_is_an_empty_library(self):
         self.assertEqual(engine.load_library(self.path),
-                         {"version": 1, "view": {"width": 960, "height": 540}, "scripts": []})
+                         {"version": 1, "view": {"width": 960, "height": 540},
+                          "tabs": [{"id": "main", "name": "Mine"}], "scripts": []})
 
     def test_invalid_json_is_an_engine_error(self):
         os.makedirs(os.path.dirname(self.path))

@@ -26,6 +26,10 @@ plugin.
 - **Reads commands from Obsidian (optional).** Turn on the Readily integration
   and any note item you tag `#runbook` shows up in the list, ready to run and
   schedule — edited in Obsidian, read-only here.
+- **Shows what Omarchy itself can do.** The Omarchy view lists every command
+  Omarchy ships — updates, snapshots, firmware, hibernation, themes, restarts
+  of Wi-Fi or Bluetooth — each with its description and examples, ready to
+  search, run, or copy into your own list.
 
 ## Install
 
@@ -59,10 +63,53 @@ output; **Close** discards the terminal. Select output with the mouse and press
 copied. Drag the bottom-right corner to resize the panel; the size is
 remembered.
 
-Keys inside the panel: `j`/`k` or the arrows move the selection, `x` deletes
-the selected command (with confirmation), `c` copies the terminal's selection
-or its whole output, `Esc` closes the panel or cancels the form, `Tab`
-switches to the next bar panel. Enter never runs a command.
+Keys inside the panel: `j`/`k` or the arrows move the selection, `h`/`l` (or
+← →) switch tabs, `J`/`K` (Shift) move the selected row — a command, a
+separator or a Readily command — down/up, `H`/`L` (Shift) send it to the
+previous/next tab, `x` deletes it (with
+confirmation), `c` copies the terminal's selection or its whole output, `/`
+searches Omarchy's commands, `Esc` closes the panel or cancels the form, `Tab`
+switches to the next bar panel. Enter in the list never runs a command.
+
+## Tabs and separators
+
+**Tabs** group your commands: one for Docker, one for the servers you
+maintain, and so on. Create, rename, reorder and delete them in the settings
+(⚙). To send a row to another tab, pick it in **In tab** under the list, or
+press `H`/`L` (Shift) to carry it one tab left or right; it lands at the end
+of that tab. The first tab you start with
+can be renamed and moved but not deleted: deleting any other tab moves its
+commands there, so nothing is ever lost with a tab.
+
+**Separators** group related commands inside a tab. Press `―` in the header to
+add one right below the selected command: a plain line, or a line with a label
+centred on it (`──── docker ────`). Select it to edit its label, move it with
+`J`/`K` or the ↑ ↓ buttons, or delete it. New commands also go right below the
+selected one, so a group can be built in place.
+
+## Omarchy's own commands
+
+Omarchy ships a few hundred commands of its own (`omarchy commands` lists
+them), and most people never find out they exist. Press the **Omarchy** tab —
+or `/` — to browse them (turn the tab off in the settings if you do not want
+it):
+
+- **Search** by name or by what the command does: `snapshot`, `firmware`,
+  `wifi`, `hibernation`. Enter or ↓ moves back to the list.
+- **Read** the usage line, Omarchy's description, and its examples. Commands
+  marked `sudo` ask for your password in the terminal.
+- **Run** in the embedded terminal, like your own commands. If the command
+  takes arguments, type them in the arguments line (Enter on the list jumps
+  there, and Enter in it runs); click an example to fill it in. A command that
+  needs arguments is never run without them.
+- **Open in terminal** runs it in Omarchy's floating terminal instead — use it
+  for commands that open a menu or a full-screen program, which the embedded
+  terminal cannot show.
+- **Add to my commands** copies it, with the arguments you typed and its help
+  text, into your own list, where you can rename it and schedule it.
+
+The list comes from `omarchy commands --json`, so it always matches your
+installed Omarchy version; commands Omarchy marks as hidden are left out.
 
 ## Scheduling
 
@@ -94,12 +141,21 @@ commands.
 - **Edit in Obsidian.** A Readily command's name, text, and help are read-only
   in Runbook — change them in Obsidian and Runbook picks up the update next
   time you open the panel.
+- **Place them where you want.** Move a Readily command up or down with
+  `J`/`K` or the ↑ ↓ buttons, and send it to another tab with **In tab** or
+  `H`/`L`, like your own commands. Runbook keeps only its place in
+  `scripts.json`; the command itself stays in Obsidian.
 - **Turn it on.** Open the gear (⚙) in the Runbook panel header, toggle
   **"Integrate with Readily"**, and make sure Readily is installed and has its
   Obsidian folder set. If Readily is unavailable, the toggle stays inert with
   no errors.
+- **Pick their tab.** With more than one tab, the settings let you choose the
+  tab new Readily commands appear in. Once you move any row, the Readily
+  commands you already have keep their place; move them one by one.
 - **Auto-cleanup.** If you rename, move to another note, or delete a Readily
-  command in Obsidian, its schedule in Runbook is cleaned up automatically.
+  command in Obsidian, its schedule and its place in Runbook are cleaned up
+  automatically. Turning the integration off keeps their places for when you
+  turn it back on.
 
 ## Notes
 
