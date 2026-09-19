@@ -134,6 +134,11 @@ class UpdateTest(unittest.TestCase):
         engine.update_script(self.library, item["id"], {"label": "docker"})
         self.assertEqual((item["kind"], item["label"]), ("separator", "docker"))
 
+    def test_the_separator_form_changes_its_tab(self):
+        item = engine.add_script(self.library, {"kind": "separator", "label": "x"})
+        engine.update_script(self.library, item["id"], {"kind": "separator", "label": "x", "tab": TAB})
+        self.assertEqual((item["kind"], item["tab"]), ("separator", TAB))
+
 
 class MoveTest(unittest.TestCase):
     def setUp(self):

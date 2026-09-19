@@ -75,9 +75,9 @@ switches to the next bar panel. Enter in the list never runs a command.
 
 **Tabs** group your commands: one for Docker, one for the servers you
 maintain, and so on. Create, rename, reorder and delete them in the settings
-(⚙). To send a row to another tab, pick it in **In tab** under the list, or
-press `H`/`L` (Shift) to carry it one tab left or right; it lands at the end
-of that tab. The first tab you start with
+(⚙). To send a command or a separator to another tab, pick the tab in its
+**Edit** form, or press `H`/`L` (Shift) to carry it one tab left or right; it
+lands at the end of that tab. The first tab you start with
 can be renamed and moved but not deleted: deleting any other tab moves its
 commands there, so nothing is ever lost with a tab.
 
@@ -142,8 +142,8 @@ commands.
   in Runbook — change them in Obsidian and Runbook picks up the update next
   time you open the panel.
 - **Place them where you want.** Move a Readily command up or down with
-  `J`/`K` or the ↑ ↓ buttons, and send it to another tab with **In tab** or
-  `H`/`L`, like your own commands. Runbook keeps only its place in
+  `J`/`K` or the ↑ ↓ buttons, and send it to another tab from its **Edit**
+  form or with `H`/`L`, like your own commands. Runbook keeps only its place in
   `scripts.json`; the command itself stays in Obsidian.
 - **Turn it on.** Open the gear (⚙) in the Runbook panel header, toggle
   **"Integrate with Readily"**, and make sure Readily is installed and has its

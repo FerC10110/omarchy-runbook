@@ -3,8 +3,8 @@ import QtQuick.Layouts
 import qs.Commons
 import qs.Ui
 
-// Add / edit form for a separator: only a label, which may stay empty for a
-// plain line. The preview draws it the way the list will.
+// Add / edit form for a separator: a label, which may stay empty for a
+// plain line, and its tab. The preview draws it the way the list will.
 Item {
   id: form
   property string title: "New separator"
@@ -15,16 +15,22 @@ Item {
   property color dim: Qt.darker(foreground, 1.55)
   property string fontFamily: Style.font.family
 
+  // The tabs to choose from, and the one this separator goes in.
+  property var tabs: []
+  property string tabId: "main"
+
   signal saveRequested(var fields)
   signal cancelRequested()
 
-  function load(separator) {
+  // defaultTab: where a new separator goes unless the form changes it.
+  function load(separator, defaultTab) {
     labelField.text = separator ? separator.label : ""
+    tabId = separator && separator.tab ? separator.tab : (defaultTab || "main")
     errorText = ""
     Qt.callLater(function() { labelField.forceActiveFocus() })
   }
 
-  function save() { form.saveRequested({ kind: "separator", label: labelField.text }) }
+  function save() { form.saveRequested({ kind: "separator", label: labelField.text, tab: tabId }) }
 
   ColumnLayout {
     anchors.left: parent.left
@@ -59,6 +65,33 @@ Item {
       accent: form.accent
       onAccepted: form.save()
       Keys.onEscapePressed: function(event) { form.cancelRequested(); event.accepted = true }
+    }
+
+    Text {
+      Layout.fillWidth: true
+      visible: tabPicker.visible
+      text: "Tab"
+      textFormat: Text.PlainText
+      color: form.dim
+      font.family: form.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+
+    Dropdown {
+      id: tabPicker
+      Layout.fillWidth: true
+      visible: form.tabs.length > 1
+      showLabel: false
+      options: form.tabs.map(function(t) { return { value: t.id, label: t.name } })
+      value: form.tabId
+      foreground: form.foreground
+      accent: form.accent
+      fontFamily: form.fontFamily
+      onChanged: function(value) {
+        form.tabId = value
+        // A pick writes the kit's value, which breaks the binding: put it back.
+        tabPicker.value = Qt.binding(function() { return form.tabId })
+      }
     }
 
     Text {

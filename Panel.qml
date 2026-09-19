@@ -220,11 +220,10 @@ Panel {
     return ""
   }
 
-  // The tab dropdown under the list and Shift+H / Shift+L: send the selected
-  // row -- a script, a separator or a Readily command -- to the end of another
-  // tab. The keys carry it along, so pressing again takes it further; the
-  // dropdown stays in this tab, on the row that took its place.
-  function moveSelectedToTab(tab, follow) {
+  // Shift+H / Shift+L: carry the selected row -- a script, a separator or a
+  // Readily command -- to the end of the previous / next tab, and follow it
+  // there, so pressing again takes it further. (The Edit form picks any tab.)
+  function moveSelectedToTab(tab) {
     if (selectedScript === null || tab === "" || editorOpen || engineWriting) return
     if (tab === (selectedScript.tab || "main")) return
     var id = selectedId
@@ -238,8 +237,8 @@ Panel {
         return
       }
       applyLibrary(payload)
+      // The tab left behind remembers the row that took its place.
       if (tabScripts.length > 0) selectedId = tabScripts[Math.min(at, tabScripts.length - 1)].id
-      if (!follow) return
       setView(tab)
       selectedId = id
       Qt.callLater(function() { list.positionViewAtIndex(tabScripts.length - 1, ListView.Contain) })
@@ -458,7 +457,7 @@ Panel {
     addAfter = selectedScript !== null ? selectedId : ""
     if (editorKind === "separator") {
       separatorPane.title = "New separator"
-      separatorPane.load(null)
+      separatorPane.load(null, view)
     } else {
       editorPane.readOnly = false
       editorPane.title = "New script"
@@ -475,7 +474,7 @@ Panel {
     editorKind = selectedIsSeparator ? "separator" : "script"
     if (editorKind === "separator") {
       separatorPane.title = "Edit separator"
-      separatorPane.load(selectedScript)
+      separatorPane.load(selectedScript, view)
     } else {
       editorPane.readOnly = editingReadily
       editorPane.title = editingReadily ? "Readily command (schedule and tab)" : "Edit script"
@@ -544,8 +543,9 @@ Panel {
     var args = adding ? ["add"] : ["update", editingId]
     var payloadIn = Object.assign({}, fields)
     if (adding) {
-      if (addAfter !== "") payloadIn.after = addAfter
       if (payloadIn.tab === undefined) payloadIn.tab = view
+      // Below the selection when it stays in this tab; at the end of another one.
+      if (addAfter !== "" && payloadIn.tab === view) payloadIn.after = addAfter
     }
     // The ids there before an add, to find the new one afterwards: Readily
     // rows come after the native ones, so it is not necessarily the last row.
@@ -873,8 +873,8 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      // While a text field or the "In tab" menu owns the keyboard, keys must reach it.
-      blocked: (runbook.editorOpen || runbook.settingsOpen || runbook.inputFocused || rowTab.popupOpen) && !confirm.opened
+      // While a text field owns the keyboard, letters must reach it.
+      blocked: (runbook.editorOpen || runbook.settingsOpen || runbook.inputFocused) && !confirm.opened
       onCloseRequested: {
         if (confirm.opened) runbook.closeConfirm(false)
         else if (runbook.editorOpen) runbook.cancelEditor()
@@ -905,8 +905,8 @@ Panel {
         if (text === "J") runbook.moveSelected(1)
         if (text === "K") runbook.moveSelected(-1)
         // Shift+H / Shift+L send it to the previous / next tab.
-        if (text === "H") runbook.moveSelectedToTab(runbook.neighbourTab(-1), true)
-        if (text === "L") runbook.moveSelectedToTab(runbook.neighbourTab(1), true)
+        if (text === "H") runbook.moveSelectedToTab(runbook.neighbourTab(-1))
+        if (text === "L") runbook.moveSelectedToTab(runbook.neighbourTab(1))
       }
 
       RowLayout {
@@ -1046,40 +1046,6 @@ Panel {
             color: runbook.dim
             font.family: runbook.fontFamily
             font.pixelSize: Style.font.bodySmall
-          }
-
-          // The selected row's tab: pick another one to send it there.
-          RowLayout {
-            Layout.fillWidth: true
-            visible: runbook.view !== "omarchy" && runbook.tabs.length > 1 && runbook.selectedScript !== null
-            spacing: Style.space(6)
-            Text {
-              text: "In tab"
-              textFormat: Text.PlainText
-              color: runbook.dim
-              font.family: runbook.fontFamily
-              font.pixelSize: Style.font.bodySmall
-            }
-            Dropdown {
-              id: rowTab
-              Layout.fillWidth: true
-              showLabel: false
-              enabled: runbook.mode !== "editor" && !runbook.engineWriting
-              options: runbook.tabs.map(function(t) { return { value: t.id, label: t.name } })
-              value: runbook.selectedScript !== null ? (runbook.selectedScript.tab || "main") : ""
-              foreground: runbook.foreground
-              accent: runbook.accent
-              fontFamily: runbook.fontFamily
-              // Picked or dismissed, j/k go back to the list.
-              onPopupOpenChanged: if (!popupOpen) keyCatcher.forceActiveFocus()
-              onChanged: function(value) {
-                // A pick writes the kit's value, which breaks the binding: put it back.
-                rowTab.value = Qt.binding(function() {
-                  return runbook.selectedScript !== null ? (runbook.selectedScript.tab || "main") : ""
-                })
-                runbook.moveSelectedToTab(value, false)
-              }
-            }
           }
 
           RowLayout {
@@ -1299,6 +1265,7 @@ Panel {
 
           SeparatorPane {
             id: separatorPane
+            tabs: runbook.tabs
             anchors.fill: parent
             visible: runbook.mode === "editor" && runbook.editorKind === "separator"
             foreground: runbook.foreground
